@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.c1589190.agentmosire.agentlib.agent.AgentConfig;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class AgentConfigTest {
@@ -29,6 +30,18 @@ class AgentConfigTest {
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> AgentConfig.builder("main").quotaMaxTokens(-1).build())
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void rejectsASingleConfigThatBothAllowsAndDeniesTheSameTool() {
+    assertThatThrownBy(
+            () ->
+                AgentConfig.builder("main")
+                    .allowedTools(Set.of("echo"))
+                    .deniedTools(Set.of("echo"))
+                    .build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("echo");
   }
 
   @Test

@@ -57,7 +57,7 @@ class SimpleAgentTest {
             trackedTool("approval", new ToolGate.Ask("fixture", "确认"), restrictedRuns)));
     AgentConfig config =
         AgentConfig.builder("simple")
-            .allowedTools(Set.of("echo", "config_deny", "host_deny", "outside_host", "approval"))
+            .allowedTools(Set.of("echo", "host_deny", "outside_host", "approval"))
             .deniedTools(Set.of("config_deny"))
             .build();
     AgentPermissionSet permissions =

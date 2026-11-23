@@ -108,7 +108,7 @@ class AgentRuntimeEmbeddingTest {
     }
     AgentConfig config =
         AgentConfig.builder("embedded")
-            .allowedTools(Set.of("allowed", "config_denied", "host_denied"))
+            .allowedTools(Set.of("allowed", "host_denied"))
             .deniedTools(Set.of("config_denied"))
             .build();
     AgentPermissionSet host =
@@ -141,7 +141,7 @@ class AgentRuntimeEmbeddingTest {
           .extracting(ContentPart.ToolResult::isError)
           .containsExactly(false, true, true, true);
       assertThat(runtime.permissionSet().allowedTools())
-          .containsExactlyInAnyOrder("allowed", "config_denied", "host_denied");
+          .containsExactlyInAnyOrder("allowed", "host_denied");
       assertThat(runtime.permissionSet().deniedTools())
           .containsExactlyInAnyOrder("config_denied", "host_denied");
       assertThat(
@@ -151,7 +151,7 @@ class AgentRuntimeEmbeddingTest {
           .satisfiesExactly(
               event -> assertThat(event).contains("outside_config"),
               event -> assertThat(event).contains("host_denied"),
-              event -> assertThat(event).contains("config_denied"));
+              event -> assertThat(event).contains("config_denied", "denied-tools"));
     }
   }
 

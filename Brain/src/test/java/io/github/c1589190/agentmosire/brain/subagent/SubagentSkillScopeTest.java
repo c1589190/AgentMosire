@@ -28,6 +28,7 @@ import io.github.c1589190.agentmosire.brain.skills.SkillPermissions;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +55,7 @@ class SubagentSkillScopeTest {
 
   @TempDir Path tempDir;
 
+  private final List<SubagentManager> managers = new ArrayList<>();
   private SqliteEventStore store;
   private EventBus bus;
   private Path agentsDir;
@@ -71,8 +73,10 @@ class SubagentSkillScopeTest {
 
   @AfterEach
   void tearDown() {
-    bus.close();
-    store.close();
+    try (var events = store;
+        var eventBus = bus) {
+      managers.reversed().forEach(SubagentManager::close);
+    }
   }
 
   @Test
@@ -275,14 +279,17 @@ class SubagentSkillScopeTest {
   private SubagentManager manager(AgentPermissionSet callerPermissions) {
     AgentTemplateStore templateStore = new AgentTemplateStore(agentsDir);
     templateStore.load();
-    return new SubagentManager(
-        templateStore,
-        new InProcessExecutor(),
-        store,
-        bus,
-        AgentConfig.builder("main").build(),
-        callerPermissions,
-        0);
+    SubagentManager manager =
+        new SubagentManager(
+            templateStore,
+            new InProcessExecutor(),
+            store,
+            bus,
+            AgentConfig.builder("main").build(),
+            callerPermissions,
+            0);
+    managers.add(manager);
+    return manager;
   }
 
   /** 调用者权限集：技能两个面按给定值，其余维取 system（把变量收敛到技能这一维）。 */

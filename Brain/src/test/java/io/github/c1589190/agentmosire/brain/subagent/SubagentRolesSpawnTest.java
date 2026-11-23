@@ -28,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,6 +53,7 @@ class SubagentRolesSpawnTest {
 
   @TempDir Path tempDir;
 
+  private final List<SubagentManager> managers = new ArrayList<>();
   private SqliteEventStore store;
   private EventBus bus;
   private Path agentsDir;
@@ -66,8 +68,10 @@ class SubagentRolesSpawnTest {
 
   @AfterEach
   void tearDown() {
-    bus.close();
-    store.close();
+    try (var events = store;
+        var eventBus = bus) {
+      managers.reversed().forEach(SubagentManager::close);
+    }
   }
 
   // ────────────────────────── A-1：请求越界 ⇒ 拒 + 事件 + 不建实例 ──────────────────────────
@@ -281,17 +285,20 @@ class SubagentRolesSpawnTest {
   private SubagentManager manager(RecordingLauncher launcher, AgentPermissionSet caller) {
     AgentTemplateStore templateStore = new AgentTemplateStore(agentsDir);
     templateStore.load();
-    return new SubagentManager(
-        templateStore,
-        launcher,
-        store,
-        bus,
-        AgentConfig.builder("main").build(),
-        caller,
-        0,
-        () -> CommandMode.FULL,
-        SubagentLimits.defaults(),
-        tempDir.resolve("subagents"));
+    SubagentManager manager =
+        new SubagentManager(
+            templateStore,
+            launcher,
+            store,
+            bus,
+            AgentConfig.builder("main").build(),
+            caller,
+            0,
+            () -> CommandMode.FULL,
+            SubagentLimits.defaults(),
+            tempDir.resolve("subagents"));
+    managers.add(manager);
+    return manager;
   }
 
   private void write(AgentTemplate template) {
@@ -323,13 +330,17 @@ class SubagentRolesSpawnTest {
     public LaunchedSubagent launch(SubagentInstance instance) {
       instances.add(instance);
       return new LaunchedSubagent() {
+        private final AtomicBoolean alive = new AtomicBoolean(true);
+
         @Override
         public boolean isAlive() {
-          return true;
+          return alive.get();
         }
 
         @Override
-        public void close() {}
+        public void close() {
+          alive.set(false);
+        }
       };
     }
 

@@ -92,10 +92,7 @@ public final class SubagentManager implements AutoCloseable {
   /** 退出观测轮询间隔（毫秒）。 */
   private static final long EXIT_POLL_MILLIS = 100L;
 
-  /**
-   * close() 对观测线程的有界 join 上限：中断后 sleep 中的线程即时退场；卡在子库 IO 的线程给足本地盘余量。 超时未退不无限等（关停链必须有限时），余下投递由
-   * watchExit 的兜底捕获降级为 WARN。
-   */
+  /** 关停时等待每个观测线程退场的上限（毫秒）。 */
   private static final long WATCHER_JOIN_MILLIS = 5_000L;
 
   /**
@@ -152,7 +149,13 @@ public final class SubagentManager implements AutoCloseable {
   /** 父侧观测到的终局（设计 §2.4 的内存面；父库事件是同一份事实的持久面）。终态不受理新增，单调写入。 */
   private final Map<String, TerminalOutcome> outcomes = new HashMap<>();
 
-  private volatile boolean closed;
+  private enum ShutdownState {
+    OPEN,
+    CLOSING,
+    CLOSED
+  }
+
+  private volatile ShutdownState shutdownState = ShutdownState.OPEN;
 
   /**
    * @param templateStore 模板库（spawn 前须完成 {@link AgentTemplateStore#load()}）
@@ -505,40 +508,44 @@ public final class SubagentManager implements AutoCloseable {
    * 异常吞成日志（既有口径）——顺序只是"谁先谁后"，不改任何终态语义。
    */
   @Override
-  public void close() {
+  public synchronized void close() {
     List<Thread> toStop;
     synchronized (lock) {
-      if (closed) {
+      if (shutdownState != ShutdownState.OPEN) {
         return;
       }
-      closed = true;
-      watchers.forEach(Thread::interrupt);
+      shutdownState = ShutdownState.CLOSING;
       toStop = List.copyOf(watchers);
       watchers.clear();
     }
-    // 关停竞态收束（2026-09-14 退出观测风暴修复）：事件库在本 manager.close 之后才关（App 关停链），
-    // 而 watchExit 的投递可能正走在子库 IO/锁等待中途——interrupt 只打断 sleep，打不断 IO。
-    // join（有界）保证"已在投递途中"的观测线程把终局事件写进仍打开的事件库，而不是撞上已关闭的连接裸崩。
-    joinWatchers(toStop);
-    List<String> live;
-    synchronized (lock) {
-      live = shutdownOrder(instances);
-    }
-    for (String id : live) {
-      try {
-        terminate(id);
-      } catch (RuntimeException e) {
-        LOG.warn("关停子 Agent 失败 id={}", id, e);
-      }
-    }
     try {
-      launcher.close();
-    } catch (RuntimeException e) {
-      LOG.warn("launcher 关闭异常", e);
+      toStop.forEach(Thread::interrupt);
+      joinWatchers(toStop);
+      List<String> live;
+      synchronized (lock) {
+        live = shutdownOrder(instances);
+      }
+      for (String id : live) {
+        try {
+          terminate(id);
+        } catch (RuntimeException e) {
+          LOG.warn("关停子 Agent 失败 id={}", id, e);
+        }
+      }
+      try {
+        launcher.close();
+      } catch (RuntimeException e) {
+        LOG.warn("launcher 关闭异常", e);
+      }
+    } finally {
+      // 退出报告也在这把锁下提交。调用方可在 close 返回后关闭事件库。
+      synchronized (lock) {
+        shutdownState = ShutdownState.CLOSED;
+      }
     }
   }
 
-  /** 逐个有界等待观测线程退场；超时未退的交由 watchExit 的兜底捕获（残余竞态不再裸崩刷栈）。 */
+  /** 给已在处理退出的观测线程留出落库时间。 */
   private void joinWatchers(List<Thread> watchers) {
     for (Thread watcher : watchers) {
       try {
@@ -548,8 +555,7 @@ public final class SubagentManager implements AutoCloseable {
         return;
       }
       if (watcher.isAlive()) {
-        LOG.warn(
-            "退出观测线程 {} 未在 {}ms 内收束（疑似卡在子库 IO），余下投递交给兜底捕获", watcher.getName(), WATCHER_JOIN_MILLIS);
+        LOG.warn("退出观测线程 {} 未在 {}ms 内结束", watcher.getName(), WATCHER_JOIN_MILLIS);
       }
     }
   }
@@ -579,7 +585,7 @@ public final class SubagentManager implements AutoCloseable {
   // ---- 内部：守卫与派生 ----
 
   private void ensureOpen() {
-    if (closed) {
+    if (shutdownState != ShutdownState.OPEN) {
       throw new IllegalStateException("SubagentManager 已关闭");
     }
   }
@@ -1577,18 +1583,22 @@ public final class SubagentManager implements AutoCloseable {
 
   /** 启动退出观测：每实例一个虚拟线程轮询存亡（100ms），把"已退出"事实投递回状态机。 */
   private void armWatch(String instanceId, LaunchedSubagent handle) {
-    Thread watcher =
-        Thread.ofVirtual()
-            .name("mosire-subagent-exit-" + instanceId)
-            .start(() -> watchExit(instanceId, handle));
     synchronized (lock) {
+      if (shutdownState != ShutdownState.OPEN) {
+        return;
+      }
+      Thread watcher =
+          Thread.ofVirtual()
+              .name("mosire-subagent-exit-" + instanceId)
+              .unstarted(() -> watchExit(instanceId, handle));
       watchers.add(watcher);
+      watcher.start();
     }
   }
 
   private void watchExit(String instanceId, LaunchedSubagent handle) {
     try {
-      while (!closed) {
+      while (shutdownState == ShutdownState.OPEN) {
         if (!handle.isAlive()) {
           onChildExited(instanceId, handle);
           return;
@@ -1644,6 +1654,9 @@ public final class SubagentManager implements AutoCloseable {
             .orElse(null);
     boolean abnormal;
     synchronized (lock) {
+      if (shutdownState == ShutdownState.CLOSED) {
+        return;
+      }
       SubagentInstance current = instances.get(instanceId);
       if (current == null || current.status().isFinal()) {
         return; // 幂等：另一条收束路径已落定（或实例从未建立），不重复迁移

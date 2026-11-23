@@ -34,6 +34,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -48,6 +49,7 @@ class SubagentManagerTest {
 
   @TempDir Path tempDir;
 
+  private final List<SubagentManager> managers = new ArrayList<>();
   private SqliteEventStore store;
   private EventBus bus;
   private Path agentsDir;
@@ -62,8 +64,10 @@ class SubagentManagerTest {
 
   @AfterEach
   void tearDown() {
-    bus.close();
-    store.close();
+    try (var events = store;
+        var eventBus = bus) {
+      managers.reversed().forEach(SubagentManager::close);
+    }
   }
 
   @Test
@@ -1107,11 +1111,53 @@ class SubagentManagerTest {
         .hasValueSatisfying(i -> assertThat(i.status()).isEqualTo(SubagentStatus.KILLED));
     assertThat(manager.get(second.instanceId()))
         .hasValueSatisfying(i -> assertThat(i.status()).isEqualTo(SubagentStatus.KILLED));
-    assertThat(lifecycleActions(first.instanceId())).contains("terminating", "killed");
-    assertThat(lifecycleActions(second.instanceId())).contains("terminating", "killed");
+    assertThat(lifecycleActions(first.instanceId()))
+        .containsExactly("configured", "spawning", "running", "terminating", "killed");
+    assertThat(lifecycleActions(second.instanceId()))
+        .containsExactly("configured", "spawning", "running", "terminating", "killed");
     // close 幂等：不会对已终态子 Agent 二次关停
     manager.close();
     assertThat(launcher.closeCalls()).isEqualTo(2);
+  }
+
+  @Test
+  void exitReportsThatOutlastShutdownDoNotWriteToClosedStorage() throws Exception {
+    write(template("reader", Set.of("read"), Set.of(), true, false, false));
+    DelayedExitLauncher launcher = new DelayedExitLauncher();
+    CompletableFuture<Boolean> kill;
+    Thread observer;
+    try (var events = SqliteEventStore.open(tempDir.resolve("late-exit.db"));
+        var eventBus = new EventBus();
+        var manager =
+            new SubagentManager(
+                store(),
+                launcher,
+                events,
+                eventBus,
+                parentConfig(),
+                AgentPermissionSet.system(),
+                0)) {
+      String id =
+          manager
+              .spawn(new SubagentLaunchRequest("reader", "目标", null, null, null, null))
+              .instanceId();
+      kill = CompletableFuture.supplyAsync(() -> manager.kill(id));
+      assertThat(launcher.exitReportsEntered.await(5, TimeUnit.SECONDS)).isTrue();
+      observer = launcher.observer.get();
+      assertThat(observer).isNotNull();
+
+      manager.close();
+
+      assertThat(observer.isAlive()).isTrue();
+      assertThat(kill.isDone()).isFalse();
+      assertThat(manager.get(id))
+          .hasValueSatisfying(i -> assertThat(i.status()).isEqualTo(SubagentStatus.TERMINATING));
+    } finally {
+      launcher.releaseReports.complete(null);
+    }
+    assertThat(observer.join(Duration.ofSeconds(5))).isTrue();
+    assertThat(launcher.observerFailure.get()).isNull();
+    assertThat(kill.get(5, TimeUnit.SECONDS)).isTrue();
   }
 
   @Test
@@ -1372,17 +1418,20 @@ class SubagentManagerTest {
       int parentDepth,
       SubagentLimits limits,
       Path childDataRoot) {
-    return new SubagentManager(
-        templateStore,
-        launcher,
-        store,
-        bus,
-        parentConfig,
-        parentPermissions,
-        parentDepth,
-        () -> CommandMode.FULL,
-        limits,
-        childDataRoot);
+    SubagentManager manager =
+        new SubagentManager(
+            templateStore,
+            launcher,
+            store,
+            bus,
+            parentConfig,
+            parentPermissions,
+            parentDepth,
+            () -> CommandMode.FULL,
+            limits,
+            childDataRoot);
+    managers.add(manager);
+    return manager;
   }
 
   /** 子库根（§2.3）：与生产装配同形（{@code <dataDir>/subagents}），测试里挂在 {@link #tempDir} 下。 */
@@ -1605,6 +1654,46 @@ class SubagentManagerTest {
     } catch (Exception ex) {
       throw new AssertionError("事件 payload 解析失败: " + e.payload(), ex);
     }
+  }
+
+  private static final class DelayedExitLauncher implements SubagentLauncher {
+
+    private final CountDownLatch exitReportsEntered = new CountDownLatch(2);
+    private final CompletableFuture<Void> releaseReports = new CompletableFuture<>();
+    private final AtomicReference<Thread> observer = new AtomicReference<>();
+    private final AtomicReference<Throwable> observerFailure = new AtomicReference<>();
+
+    @Override
+    public LaunchedSubagent launch(SubagentInstance instance) {
+      return new LaunchedSubagent() {
+        private final AtomicBoolean alive = new AtomicBoolean(true);
+
+        @Override
+        public boolean isAlive() {
+          return alive.get();
+        }
+
+        @Override
+        public Optional<String> exitDiagnostics() {
+          Thread reporter = Thread.currentThread();
+          if (reporter.isVirtual()) {
+            observer.set(reporter);
+            reporter.setUncaughtExceptionHandler((thread, failure) -> observerFailure.set(failure));
+          }
+          exitReportsEntered.countDown();
+          releaseReports.join();
+          return Optional.empty();
+        }
+
+        @Override
+        public void close() {
+          alive.set(false);
+        }
+      };
+    }
+
+    @Override
+    public void close() {}
   }
 
   /** 门闩 launcher：launch 进入后阻塞，直到 {@link #release()}——确定性复现 SPAWNING 窗口 kill 竞态。 */

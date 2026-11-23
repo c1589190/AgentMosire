@@ -35,6 +35,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 /**
  * {@code bash} 的权限门禁契约（P2-5 / T15）：把既有的门禁链（{@link AgentPipeline} → {@link ToolExecutionGuard} →
@@ -45,7 +47,7 @@ import org.junit.jupiter.api.io.TempDir;
  * 被拒"证明不了"破坏性工具默认不可用"（那是白名单分支的功劳）；本类按 R8 逐条把拒绝<b>归因</b>到预期分支：
  *
  * <ol>
- *   <li>guest（白名单<b>刻意</b>含 bash）→ 身份级别分支；
+ *   <li>READONLY 使用通配白名单 → 身份级别分支；
  *   <li>DEFAULT 且 bash 已入白名单、未显式放行 → 破坏性需显式放行分支（<b>"破坏性工具默认不可用"的真正保证</b>）；
  *   <li>显式放行 → 全分支通过，调用真的到达工具执行。
  * </ol>
@@ -93,15 +95,12 @@ class ShellPermissionTest {
     store.close();
   }
 
-  /**
-   * 状态 ① guest：白名单<b>刻意</b>含 bash，好把拒绝归因从"白名单 deny-default"分支移到"身份级别"分支——空白名单时白名单分支
-   * 先拒，这条用例就退化成"白名单拒绝"的空转（R8 点名的失败形态）。
-   */
+  /** 状态 ① READONLY 使用通配白名单，仍须达到 bash 的默认身份门槛。 */
   @Test
   @Timeout(30)
-  void guestIsDeniedByIdentityLevelNotByWhitelist() throws Exception {
+  void readOnlyWildcardGrantStillRequiresTheDefaultIdentityLevel() throws Exception {
     AgentPermissionSet permissions =
-        AgentPermissionSet.builder(AccessToken.READONLY).allow(ShellTool.NAME).build();
+        AgentPermissionSet.builder(AccessToken.READONLY).allowAll().build();
     ToolRegistry registry = new ToolRegistry();
 
     ShellCall call = runBash(registry, permissions, "echo " + RAN_SENTINEL);
@@ -138,11 +137,14 @@ class ShellPermissionTest {
    *
    * <p>刻意不用 {@code AgentPermissionSet.unrestricted(...)}／{@code system()}：它们放行一切，会绕开本用例要钉的那条路径。
    */
-  @Test
+  @ParameterizedTest
+  @EnumSource(
+      value = AccessToken.class,
+      names = {"READONLY", "DEFAULT"})
   @Timeout(30)
-  void explicitAllowLetsTheCallReachTheTool() {
+  void explicitAllowLetsTheCallReachTheTool(AccessToken token) {
     AgentPermissionSet permissions =
-        AgentPermissionSet.builder(AccessToken.DEFAULT)
+        AgentPermissionSet.builder(token)
             .allow(ShellTool.NAME)
             .sensitiveAllowed(true)
             .destructiveAllowed(true)

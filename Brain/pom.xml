@@ -8,7 +8,7 @@
   <parent>
     <groupId>io.github.c1589190.agentmosire</groupId>
     <artifactId>agent-mosire-parent</artifactId>
-    <version>0.0.1-early2</version>
+    <version>0.0.1-early3</version>
   </parent>
 
   <artifactId>brain-mosire</artifactId>
@@ -53,5 +53,35 @@
       <artifactId>mockito-core</artifactId>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-slf4j2-impl</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>resolve-mockito-agent-path</id>
+            <phase>process-test-classes</phase>
+            <goals>
+              <goal>properties</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <!-- Mockito 使用 bootstrap classpath，关闭本测试 JVM 的 CDS。 -->
+          <argLine>${surefire.memoryArgs} -Xshare:off -javaagent:"${org.mockito:mockito-core:jar}"</argLine>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
 </project>
