@@ -29,6 +29,7 @@ import io.github.c1589190.main.gateway.debug.DebugImageAssetStore;
 import io.github.c1589190.main.setup.LlmSetupWizard;
 import io.github.c1589190.main.setup.SetupLlmRouter;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -128,6 +129,10 @@ public final class Main {
     }
     if (fake && fakeScript != null) {
       throw new IllegalArgumentException("--fake 与 --fake-script 不能同时指定");
+    }
+    Path agentConfigs = config.dataDir().resolve("agentconfigs");
+    if (config.templatesDir() == null && Files.isDirectory(agentConfigs)) {
+      config = withTemplatesDir(config, agentConfigs);
     }
     // W5：离线 LLM 显式声明面（smoke.sh 断言"断网可测"）；三期 S1-A1：以上开关都不给时一律真模型（缺配置/缺密钥响亮失败，不退化）
     // 配置引导（设计-配置引导.md D1）：真模型路径 + 无配置 + 交互终端 ⇒ 先走向导，写盘后再启动
@@ -778,7 +783,7 @@ public final class Main {
         子命令:
           run             启动网关守护并执行主 Agent 主循环
              --port <n>      监听端口（默认 8080；0=自动分配）
-             --data-dir <p>  数据目录（默认 .work/mosire）
+             --data-dir <p>  数据目录（默认 .agentmosire）
              --demo          启动时先跑一条脚本问答（自检：事件入库）
              --demo-message <t> 启动时跑指定内容的脚本问答
              --mcp-link <p>    外部 MCP stdio server 配置（mcp-links.json，数组格式）
@@ -788,7 +793,7 @@ public final class Main {
              --agui-address <h>  AG-UI 网关绑定地址（默认 127.0.0.1；对外打开须显式配置）
              --agui-port <n>    AG-UI 网关端口（默认 0 = 空闲端口自动分配）
              --debug-port <n>   调试对话网关端口（默认 0 = 空闲端口自动分配；恒绑 127.0.0.1）
-             --templates-dir <p> 子 Agent 模板目录（configs/agents；缺省不启用编排）
+             --templates-dir <p> 子 Agent 模板目录（默认读取已存在的 <data-dir>/agentconfigs）
              --fake          显式启用离线假 LLM（FakeLlmClient 骨架回复；不触任何网络）
              --fake-script <s> 离线脚本 LLM：分号分隔步骤，text:<回复> 或 tool:<工具>:<args JSON>；
                                args 字符串值 $spawnedId 替换为最近一次 spawn_sub_agent 结果实例 id
@@ -797,16 +802,16 @@ public final class Main {
                                缺密钥在首次调用响亮失败，都不退回假 LLM。--demo 不读配置）
           health          当前进程健康自检（进程内信息）
           events          查看本地事件库尾部
-             --data-dir <p>  数据目录（默认 .work/mosire）
+             --data-dir <p>  数据目录（默认 .agentmosire）
              --limit <n>     显示条数（默认 10）
           context         查看 LLM 调用 token 统计（llm.call 事件汇总）
-             --data-dir <p>  数据目录（默认 .work/mosire）
+             --data-dir <p>  数据目录（默认 .agentmosire）
           agent           W3b 子 Agent stdio 进程形态（runtime + MCP client；无网关）
              --id <id>       实例 id（必填，父装配层生成）
              --template <t>  模板 id（必填）
              --goal <g>      目标任务（必填）
              --templates-dir <p> 模板目录（默认 configs/agents）
-             --data-dir <p>  数据目录（默认 .work/mosire）
+             --data-dir <p>  数据目录（默认 .agentmosire）
              --config-dir <p> 父的配置根：在场则按 <p>/config.json 的 llm.* 走真模型（只传路径，
                               密钥由本进程自己读；缺席 = 模板引导脚本假 LLM）
              --parent-link   以 MCP client 身份接管 stdin/stdout（父侧已建链接）

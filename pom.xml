@@ -35,6 +35,11 @@
     <module>AgentLib</module>
     <module>Brain</module>
     <module>Main</module>
+    <module>plugins/Workspace</module>
+    <module>plugins/Docs</module>
+    <module>plugins/Search</module>
+    <module>plugins/Bash</module>
+    <module>Distribution</module>
   </modules>
 
   <properties>

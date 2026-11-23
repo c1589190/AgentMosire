@@ -86,6 +86,35 @@ class PluginToolSourceTest {
   // ---------- 正向路径 ----------
 
   @Test
+  void dependenciesStartBeforeTheirDependentsAndStopAfterThem() throws IOException {
+    Path alpha =
+        compilePlugin(
+            List.of(
+                new PluginSource(
+                    "plug.alpha.AlphaSource",
+                    sourceTemplate("plug.alpha", "AlphaSource", "alpha", List.of("alpha_one")))));
+    Path beta =
+        compilePlugin(
+            List.of(
+                new PluginSource(
+                    "plug.beta.BetaSource",
+                    sourceTemplate("plug.beta", "BetaSource", "beta", List.of("beta_one")))));
+    writeJar(pluginsDir.resolve("a-dependent.jar"), beta, "beta-plugin", "1.0.0", "alpha-plugin");
+    assertThatThrownBy(source::loadAll)
+        .isInstanceOf(PluginLoadException.class)
+        .hasMessageContaining("alpha-plugin");
+    assertThat(registry.listBySource("beta")).isEmpty();
+
+    writeJar(pluginsDir.resolve("z-dependency.jar"), alpha, "alpha-plugin", "1.0.0");
+    assertThat(source.loadAll()).containsExactly("alpha-plugin", "beta-plugin");
+    source.disable("alpha-plugin");
+    assertThat(registry.listBySource("alpha")).isEmpty();
+    assertThat(registry.listBySource("beta")).isEmpty();
+    assertThat(events)
+        .containsSubsequence("beta-plugin|STOPPED|1.0.0", "alpha-plugin|STOPPED|1.0.0");
+  }
+
+  @Test
   void loadAllRegistersPluginToolsUnderTheirOwnSource() throws IOException {
     registerBuiltin("builtin_alpha");
     Path classes =
@@ -812,6 +841,12 @@ class PluginToolSourceTest {
   /** 打包成 PF4J 插件 JAR（pluginId/version 为 null 即"缺描述符"的负面 fixture）。 */
   private static void writeJar(Path jar, Path classesDir, String pluginId, String version)
       throws IOException {
+    writeJar(jar, classesDir, pluginId, version, null);
+  }
+
+  private static void writeJar(
+      Path jar, Path classesDir, String pluginId, String version, String dependency)
+      throws IOException {
     Manifest manifest = new Manifest();
     Attributes attributes = manifest.getMainAttributes();
     attributes.put(Attributes.Name.MANIFEST_VERSION, "1.0");
@@ -820,6 +855,9 @@ class PluginToolSourceTest {
     }
     if (version != null) {
       attributes.putValue("Plugin-Version", version);
+    }
+    if (dependency != null) {
+      attributes.putValue("Plugin-Dependencies", dependency);
     }
     try (JarOutputStream out = new JarOutputStream(Files.newOutputStream(jar), manifest);
         Stream<Path> files = Files.walk(classesDir)) {

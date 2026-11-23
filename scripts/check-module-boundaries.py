@@ -18,6 +18,12 @@ MODULES = {
     "AgentLib": ("agentlib", {}),
     "Brain": ("brain", {"agentlib": "compile"}),
     "Main": ("main", {"agentlib": "compile", "brain": "compile"}),
+    "plugins/Workspace": ("workspace", {"agentlib": "provided"}),
+    "plugins/Docs": ("docs", {"agentlib": "provided", "workspace": "provided"}),
+    "plugins/Search": ("search", {"agentlib": "provided", "brain": "test"}),
+    "plugins/Bash": ("bash", {"agentlib": "provided", "workspace": "provided", "brain": "test"}),
+    "Distribution": (None, {dependency: "runtime" for dependency in (
+        "main", "workspace", "docs", "search", "bash")}),
 }
 
 
@@ -46,7 +52,7 @@ def check(root):
     for module, (namespace, allowed) in MODULES.items():
         pom_path = root / module / "pom.xml"
         pom = ET.parse(pom_path).getroot()
-        allowed_artifacts = {f"{dependency}-mosire": scope for dependency, scope in allowed.items()}
+        allowed_artifacts = {("bash-plugin-mosire" if dependency == "bash" else f"{dependency}-mosire"): scope for dependency, scope in allowed.items()}
         for artifact, scope, optional in dependencies(pom):
             if allowed_artifacts.get(artifact) != scope:
                 problems.append(f"{module}/pom.xml: 越界直接依赖 {artifact}:{scope}")
@@ -54,9 +60,9 @@ def check(root):
                 problems.append(f"{module}/pom.xml: {artifact} 应为直接依赖")
 
         allowed_imports = {namespace}
-        allowed_imports.update(key for key, scope in allowed.items() if scope == "compile")
+        allowed_imports.update(key for key, scope in allowed.items() if scope in {"compile", "provided"})
         sources = sorted((root / module / "src/main/java").rglob("*.java"))
-        if not sources:
+        if namespace is not None and not sources:
             problems.append(f"{module}: 缺少生产 Java 源文件")
         source_count += len(sources)
         for source in sources:

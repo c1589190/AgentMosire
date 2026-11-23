@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<assembly xmlns="http://maven.apache.org/ASSEMBLY/2.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/ASSEMBLY/2.2.0 https://maven.apache.org/xsd/assembly-2.2.0.xsd">
+  <id>bundle</id>
+  <formats><format>zip</format></formats>
+  <includeBaseDirectory>true</includeBaseDirectory>
+  <files>
+    <file>
+      <source>${project.basedir}/../Main/target/mosire.jar</source>
+      <outputDirectory>/</outputDirectory>
+    </file>
+  </files>
+  <fileSets>
+    <fileSet>
+      <directory>${project.basedir}/..</directory>
+      <outputDirectory>/</outputDirectory>
+      <includes>
+        <include>README.md</include>
+        <include>LICENSE</include>
+        <include>NOTICE</include>
+      </includes>
+    </fileSet>
+  </fileSets>
+  <dependencySets>
+    <dependencySet>
+      <outputDirectory>.agentmosire/plugins</outputDirectory>
+      <useProjectArtifact>false</useProjectArtifact>
+      <useTransitiveDependencies>false</useTransitiveDependencies>
+      <useStrictFiltering>true</useStrictFiltering>
+      <includes>
+        <include>io.github.c1589190:workspace-mosire</include>
+        <include>io.github.c1589190:docs-mosire</include>
+        <include>io.github.c1589190:search-mosire</include>
+        <include>io.github.c1589190:bash-plugin-mosire</include>
+      </includes>
+    </dependencySet>
+  </dependencySets>
+</assembly>

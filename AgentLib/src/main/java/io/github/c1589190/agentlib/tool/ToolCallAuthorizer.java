@@ -202,7 +202,8 @@ public final class ToolCallAuthorizer {
     }
     // 资源判定（S5-C）：先声明式前置闸，再把判定者注入上下文交给工具的命令式断言。
     // 判定者是"调用者权限集 × 工具声明的资源面"当场建出来的——锚在调用者身份上（S5-A 的锚点纪律），不是构造期常量。
-    ResourceAuthorizer resources = ResourceAuthorizer.of(context.permissions(), tool.resources());
+    ToolContext scoped = withResourceAuthorization(tool, context);
+    ResourceAuthorizer resources = scoped.resources();
     Optional<String> resourceDenial = resources.denial();
     if (resourceDenial.isPresent()) {
       // 终局：不进审批（"够不着"不是人能裁决的事）。拒因是配置面的数据（命名空间 + 可达面摘要），不含模型自造串。
@@ -213,7 +214,6 @@ public final class ToolCallAuthorizer {
           context.permissions().resourceScopes().summary());
       return ToolResult.error(RESOURCE_DENIED, resourceDenial.get());
     }
-    ToolContext scoped = context.withResources(resources);
     // ★ P3d（设计 §5sexies⑥）：一次性放行的**探测**——只认子体链上带回来的放行标记（包 id + 条目序号），
     //   不带标记的调用在这里拿到的就是空值，判定链一个字节都不变。
     //   标记在场但不成立 ⇒ 具名拒，**绝不**落到审批闸：否则"伪造一个标记"就成了一次免审批的执行尝试。
@@ -281,6 +281,17 @@ public final class ToolCallAuthorizer {
     ToolResult result = executeWithTimeout(tool, effective);
     registerQueuedByParent(result, tool, effective);
     return result;
+  }
+
+  /** Applies the same resource boundary to direct calls and already-approved calls. */
+  public static ToolContext withResourceAuthorization(AgentTool tool, ToolContext context) {
+    var limits = tool.resourceLimits(context);
+    var permissions = context.permissions();
+    if (!limits.namespaces().isEmpty()) {
+      permissions = permissions.withResourceScopes(permissions.resourceScopes().narrowTo(limits));
+      context = context.withPermissions(permissions);
+    }
+    return context.withResources(ResourceAuthorizer.of(permissions, tool.resources()));
   }
 
   /**

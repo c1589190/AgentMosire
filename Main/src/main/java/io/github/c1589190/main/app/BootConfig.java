@@ -39,7 +39,7 @@ public record BootConfig(
     boolean setup,
     int setupPort) {
 
-  public static final Path DEFAULT_DATA_DIR = Path.of(".work/mosire");
+  public static final Path DEFAULT_DATA_DIR = Path.of(".agentmosire");
 
   /** A2A 网关默认绑定地址（红线：默认仅本机）。 */
   public static final String DEFAULT_A2A_HOST = "127.0.0.1";

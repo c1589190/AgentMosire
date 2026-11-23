@@ -41,7 +41,6 @@ import io.github.c1589190.agentlib.permission.ResourceScopeMap;
 import io.github.c1589190.agentlib.permission.RoleCatalogAudit;
 import io.github.c1589190.agentlib.permission.RoleSet;
 import io.github.c1589190.agentlib.plugin.BuiltinToolSource;
-import io.github.c1589190.agentlib.plugin.HostServices;
 import io.github.c1589190.agentlib.plugin.PluginListener;
 import io.github.c1589190.agentlib.plugin.PluginToolSource;
 import io.github.c1589190.agentlib.proc.SubprocessManager;
@@ -109,12 +108,13 @@ import io.github.c1589190.main.gateway.debug.DebugChatService;
 import io.github.c1589190.main.gateway.debug.DebugImageAssetStore;
 import io.github.c1589190.main.setup.SetupHttpServer;
 import io.github.c1589190.main.setup.SetupLlmRouter;
+import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -130,6 +130,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.a2aproject.sdk.spec.AgentCapabilities;
 import org.a2aproject.sdk.spec.AgentCard;
 import org.a2aproject.sdk.spec.AgentInterface;
@@ -493,9 +495,15 @@ public final class App implements AutoCloseable {
       // 主 Agent 是 system() 权限集 ⇒ spec() 的 sensitive+destructive 位天然放行（用户裁决"全功能"）；
       // 子体拿不到它——出厂模板 allowedTools 不含 bash（S5 的裁决面）。工具未标 noExport ⇒ 会进 MCP 外发面
       // （有意的：子体的白名单挡着，启动日志会报出实际外发面）。Main 注入 tools.bash 字段，由插件在 init 里校验。
-      PluginToolSource pluginTools = wirePlugins(configStore, tools, events, excludedEnvironment);
+      PluginToolSource pluginTools =
+          wirePlugins(config.dataDir(), configStore, tools, events, excludedEnvironment);
       if (pluginTools != null) {
         startupCleanup.add(pluginTools::close);
+        pluginTools.attachAgent(
+            agentConfig.id(),
+            null,
+            agentConfig.id(),
+            PluginFiles.mainAgentSettings(config.dataDir()));
       }
       ApprovalConfig approvalConfig = ApprovalConfigLoader.load(configStore);
       // ★ 裁定 15 ④（2026-10-17 用户指令「这玩意他妈不是可配置项吗？」）：决策链路的两个等待窗做成配置项——
@@ -557,6 +565,13 @@ public final class App implements AutoCloseable {
           AgentPermissionSet.system()
               .withResourceScopes(ResourceScopeMap.of(ResourceScopeMap.FS, workingDirs))
               .withRoles(agentRoles);
+      if (pluginTools != null) {
+        permissionSet =
+            permissionSet.withResourceScopes(
+                permissionSet
+                    .resourceScopes()
+                    .narrowTo(pluginTools.agentResourceLimits(agentConfig.id())));
+      }
       LOG.info("主 Agent 工作目录围栏: {}（配置 agents.workingDirs；* = 不限，子体逐跳只减不增）", workingDirs.summary());
       LOG.info(
           "主 Agent 角色维: 角色数={}（配置 agent.roles；缺省 0 = 谁都不是 = 角色门工具全拒；角色名不落日志）",
@@ -819,6 +834,7 @@ public final class App implements AutoCloseable {
                 permissionSet,
                 subagentConfigDir,
                 allowedLlmEnvironment,
+                pluginTools,
                 // ★ P3d：子体桥用**带本轮队列缝**的那一份（子体的 Ask 由父侧记账），外部 MCP 面仍用上面那份
                 subagentBridgeAuthorizer,
                 commandMode,
@@ -1051,6 +1067,7 @@ public final class App implements AutoCloseable {
       AgentPermissionSet parentPermissions,
       Path subagentConfigDir,
       Set<String> allowedLlmEnvironment,
+      PluginToolSource pluginTools,
       ToolCallAuthorizer authorizer,
       CommandModeHolder commandMode,
       SubagentLimits limits,
@@ -1078,7 +1095,9 @@ public final class App implements AutoCloseable {
       SubagentManager manager =
           new SubagentManager(
               templateStore,
-              executor,
+              pluginTools == null
+                  ? executor
+                  : new PluginSubagentLauncher(executor, pluginTools, templateStore),
               events,
               bus,
               parentConfig,
@@ -1117,13 +1136,14 @@ public final class App implements AutoCloseable {
       int skillsListingBudget,
       Set<String> allowedLlmEnvironment) {
     String java = ProcessHandle.current().info().command().filter(c -> !c.isBlank()).orElse("java");
+    String classpath =
+        Arrays.stream(
+                System.getProperty("java.class.path", "")
+                    .split(Pattern.quote(File.pathSeparator), -1))
+            .map(entry -> Path.of(entry).toAbsolutePath().normalize().toString())
+            .collect(Collectors.joining(File.pathSeparator));
     List<String> prefix =
-        new ArrayList<>(
-            List.of(
-                "-cp",
-                System.getProperty("java.class.path", ""),
-                "io.github.c1589190.main.Main",
-                "agent"));
+        new ArrayList<>(List.of("-cp", classpath, "io.github.c1589190.main.Main", "agent"));
     if (subagentConfigDir != null) {
       prefix.add("--llm-env-allow");
       prefix.add(String.join(",", new TreeSet<>(allowedLlmEnvironment)));
@@ -1179,11 +1199,12 @@ public final class App implements AutoCloseable {
    * 半装配的本源在冒泡前就地回收，关闭异常附加在原失败上。
    */
   private static PluginToolSource wirePlugins(
+      Path dataDir,
       FileConfigStore configStore,
       ToolRegistry tools,
       EventStore events,
       Set<String> excludedEnvironment) {
-    PluginDirResolution resolution = resolvePluginsDir(configStore, codeLocation());
+    PluginDirResolution resolution = resolvePluginsDir(configStore, dataDir);
     if (resolution.dir() == null) {
       LOG.info("插件面：未启用（{}）", resolution.skipReason());
       return null;
@@ -1193,10 +1214,13 @@ public final class App implements AutoCloseable {
             resolution.dir(),
             tools,
             pluginLifecycleSink(events),
+            Version.VERSION,
             pluginId ->
-                HostServices.inputs(
+                PluginFiles.load(
+                    resolution.dir(),
+                    dataDir,
+                    pluginId,
                     configStore.get("tools", pluginId).orElse(null),
-                    Map.of(),
                     excludedEnvironment));
     try {
       List<String> loaded = plugins.loadAll();
@@ -1265,18 +1289,8 @@ public final class App implements AutoCloseable {
     }
   }
 
-  /**
-   * 插件目录解析（设计 D4，纯函数便于单测）：{@code plugins.enabled=false} ⇒ 不装载（缺省 {@code true}）； {@code plugins.dir}
-   * ⇒ 用它（相对路径按进程 cwd 绝对化）；否则仅当<b>真 jar 启动</b>（代码位置是文件）时缺省 = {@code <jar 目录>/plugins}（与 D7
-   * 的产物布局正好命中）。开发/测试的 classes 形态<b>不推导缺省目录</b>——从 {@code target/classes} 出发算父目录会命中 {@code
-   * target/plugins}（打包产物），让测试面随打包状态漂移（2026-09-14 实测踩坑：AppMcpLinkTest 的子进程因此意外装载
-   * bash）。要在这类形态启用插件请显式配 {@code plugins.dir}。键存在但值非法 ⇒ 响亮失败——本仓"配置项存在但值非法 ⇒ 启动响亮失败"的统一口径，不静默回退。
-   *
-   * <p><b>显式目录缺失 ≠ 缺省目录缺失（D4.4 的两读，此处定死）</b>：缺省目录不存在 = "没装插件"的正常部署态（软跳过）； 显式 {@code plugins.dir}
-   * 指向缺失目录 = <b>硬要求落空</b> ⇒ 返回该路径、由 {@link PluginToolSource} 构造器响亮失败——
-   * 用户点名了位置而那里什么都没有，静默跳过会得到"看起来配了、其实没生效"的部署。
-   */
-  static PluginDirResolution resolvePluginsDir(ConfigStore configStore, Path codeLocation) {
+  /** 默认读取当前数据根下的插件目录，显式目录缺失仍由加载器报错。 */
+  static PluginDirResolution resolvePluginsDir(ConfigStore configStore, Path dataDir) {
     Optional<JsonNode> enabled = configStore.get(PLUGINS_SECTION, PLUGINS_ENABLED_KEY);
     if (enabled.isPresent() && !enabled.get().isNull()) {
       JsonNode value = enabled.get();
@@ -1297,27 +1311,11 @@ public final class App implements AutoCloseable {
       }
       return new PluginDirResolution(Path.of(value.asText()).toAbsolutePath(), null);
     }
-    if (codeLocation == null || !Files.isRegularFile(codeLocation)) {
-      return PluginDirResolution.skip("非 jar 启动（开发/测试形态），无缺省插件目录（要启用请配置 plugins.dir）");
-    }
-    Path codeParent = codeLocation.toAbsolutePath().getParent();
-    if (codeParent == null) {
-      return PluginDirResolution.skip("代码位置无父目录，缺省插件目录无从推导（要启用请配置 plugins.dir）");
-    }
-    Path defaultDir = codeParent.resolve("plugins");
-    if (!Files.isDirectory(defaultDir)) {
+    Path defaultDir = dataDir.toAbsolutePath().normalize().resolve("plugins");
+    if (Files.notExists(defaultDir)) {
       return PluginDirResolution.skip("目录不存在: " + defaultDir);
     }
     return new PluginDirResolution(defaultDir, null);
-  }
-
-  /** 本类代码位置（真进程 = mosire.jar；测试/开发 = target/classes；取不到 = null）。 */
-  private static Path codeLocation() {
-    try {
-      return Path.of(App.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-    } catch (RuntimeException | URISyntaxException e) {
-      return null;
-    }
   }
 
   private static void runDemo(App app, AgentRuntime runtime, String message) {
@@ -1539,13 +1537,6 @@ public final class App implements AutoCloseable {
         });
     closeQuietly("MCP 链接", () -> closeLinks(new McpLinks(mcpSources, mcpBridges)));
     closeQuietly(
-        "插件面",
-        () -> {
-          if (pluginTools != null) {
-            pluginTools.close();
-          }
-        });
-    closeQuietly(
         "配置引导面",
         () -> {
           if (setupServer != null) {
@@ -1567,6 +1558,13 @@ public final class App implements AutoCloseable {
           }
         });
     closeQuietly("Agent 运行时", () -> runtime.close());
+    closeQuietly(
+        "插件面",
+        () -> {
+          if (pluginTools != null) {
+            pluginTools.close();
+          }
+        });
     closeQuietly("事件总线与 SQLite 存储", storage::close);
     terminated.countDown();
   }

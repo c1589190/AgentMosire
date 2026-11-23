@@ -16,46 +16,15 @@ import org.junit.jupiter.api.io.TempDir;
 /** Main 插件目录解析的装配测试。 */
 class AppPluginsWiringTest {
 
-  private static final String PLUGIN_VERSION = "0.1.0-SNAPSHOT";
-
   @TempDir Path tempDir;
 
-  // ---------- resolvePluginsDir：D4 解析顺序（纯函数） ----------
-
   @Test
-  void withoutAnyConfigTheDefaultDirectoryIsNextToTheJar() throws IOException {
-    FileConfigStore store = new FileConfigStore(tempDir.resolve("conf"));
-    Files.createDirectories(tempDir.resolve("apps"));
-    Path jar = Files.createFile(tempDir.resolve("apps").resolve("mosire.jar"));
-
-    App.PluginDirResolution resolution = App.resolvePluginsDir(store, jar);
-
-    assertThat(resolution.dir()).isNull();
-    assertThat(resolution.skipReason())
-        .contains("目录不存在")
-        .contains(tempDir.resolve("apps").resolve("plugins").toString());
-  }
-
-  @Test
-  void classesFormStartDoesNotDeriveADefaultPluginsDirectory() throws IOException {
-    FileConfigStore store = new FileConfigStore(tempDir.resolve("conf"));
-    Path classesDir = Files.createDirectories(tempDir.resolve("apps").resolve("classes"));
-
-    App.PluginDirResolution resolution = App.resolvePluginsDir(store, classesDir);
-
-    assertThat(resolution.dir()).isNull();
-    assertThat(resolution.skipReason()).contains("非 jar 启动");
-  }
-
-  @Test
-  void missingCodeLocationDoesNotDeriveADefaultPluginsDirectory() {
-    FileConfigStore store = new FileConfigStore(tempDir.resolve("conf"));
-
+  void absentDefaultDirectoryIsAnEmptyInstallation() {
+    Path dataDir = tempDir.resolve("data");
     App.PluginDirResolution resolution =
-        App.resolvePluginsDir(store, tempDir.resolve("nowhere").resolve("mosire.jar"));
-
+        App.resolvePluginsDir(new FileConfigStore(dataDir), dataDir);
     assertThat(resolution.dir()).isNull();
-    assertThat(resolution.skipReason()).contains("非 jar 启动");
+    assertThat(resolution.skipReason()).contains(dataDir.resolve("plugins").toString());
   }
 
   @Test
@@ -74,17 +43,28 @@ class AppPluginsWiringTest {
   }
 
   @Test
-  void defaultDirectoryIsDerivedWhenItExistsNextToTheJar() throws IOException {
-    Files.createDirectories(tempDir.resolve("apps").resolve("plugins"));
-    Path jar = Files.createFile(tempDir.resolve("apps").resolve("mosire.jar"));
-
+  void theDefaultDirectoryFollowsTheDataRoot() throws IOException {
+    Path dataDir = tempDir.resolve("data");
+    Path plugins = Files.createDirectories(dataDir.resolve("plugins"));
     App.PluginDirResolution resolution =
-        App.resolvePluginsDir(new FileConfigStore(tempDir.resolve("conf")), jar);
-
-    // 生产路径的正分支：真 jar + 同目录 plugins/ ⇒ 原样返回（后续 loadAll 在其上装载）
-    assertThat(resolution.dir())
-        .isEqualTo(tempDir.resolve("apps").resolve("plugins").toAbsolutePath());
+        App.resolvePluginsDir(new FileConfigStore(dataDir), dataDir);
+    assertThat(resolution.dir()).isEqualTo(plugins);
     assertThat(resolution.skipReason()).isNull();
+  }
+
+  @Test
+  void eachPluginGetsOnlyItsOwnConfigurationAndDirectory() throws IOException {
+    Path root = Files.createDirectories(tempDir.resolve("plugins"));
+    writeConfig(root.resolve("one"), "{\"value\":1}");
+    writeConfig(root.resolve("two"), "{\"value\":2}");
+    var one = PluginFiles.load(root, tempDir, "one", null, java.util.Set.of());
+    var two = PluginFiles.load(root, tempDir, "two", null, java.util.Set.of());
+    assertThat(one.pluginDirectory()).isEqualTo(root.resolve("one"));
+    assertThat(two.pluginDirectory()).isEqualTo(root.resolve("two"));
+    assertThat(one.settings().path("value").asInt()).isEqualTo(1);
+    assertThat(two.settings().path("value").asInt()).isEqualTo(2);
+    assertThatThrownBy(() -> PluginFiles.load(root, tempDir, "../one", null, java.util.Set.of()))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

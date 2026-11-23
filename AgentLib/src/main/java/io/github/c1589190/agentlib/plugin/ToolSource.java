@@ -2,8 +2,10 @@
 
 package io.github.c1589190.agentlib.plugin;
 
+import io.github.c1589190.agentlib.permission.ResourceScopeMap;
 import io.github.c1589190.agentlib.tool.AgentTool;
 import java.util.List;
+import java.util.Optional;
 import org.pf4j.ExtensionPoint;
 
 /**
@@ -26,6 +28,21 @@ import org.pf4j.ExtensionPoint;
  * 通知注册方做增量同步，实现不得自行向 {@link io.github.c1589190.agentlib.tool.ToolRegistry} 之外的全局状态注册工具。
  */
 public interface ToolSource extends ExtensionPoint {
+
+  /** 向声明依赖的插件提供当前实例持有的服务。 */
+  default <T> Optional<T> service(Class<T> type) {
+    return Optional.empty();
+  }
+
+  /** 按可信的运行实例注册插件专用配置；返回该实例的清理操作。 */
+  default Runnable attachAgent(PluginAgent agent) {
+    return () -> {};
+  }
+
+  /** Resource ceilings used when the host derives permissions for this bound Agent. */
+  default ResourceScopeMap agentResourceLimits(String instanceId) {
+    return ResourceScopeMap.empty();
+  }
 
   /**
    * 装载时注入宿主服务（{@link HostServices}）：<b>一次</b>，早于 {@link #listTools()}，由装载方（{@link

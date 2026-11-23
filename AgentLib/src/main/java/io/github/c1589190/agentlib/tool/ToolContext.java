@@ -85,4 +85,9 @@ public record ToolContext(
   public ToolContext withResources(ResourceAuthorizer newResources) {
     return new ToolContext(caller, permissions, config, arguments, identity, newResources);
   }
+
+  /** Maintain the bound identity while narrowing permissions for a tool. */
+  public ToolContext withPermissions(AgentPermissionSet effective) {
+    return new ToolContext(caller, effective, config, arguments, identity, resources);
+  }
 }

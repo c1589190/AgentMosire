@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Modified for AgentMosire from the ProjectMosire source. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.github.c1589190</groupId>
+    <artifactId>agent-mosire-parent</artifactId>
+    <version>0.0.1-early</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+  <artifactId>search-mosire</artifactId>
+  <name>Search</name>
+  <description>可选的网页搜索与抓取工具，支持 Java 嵌入和 PF4J 装载</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.github.c1589190</groupId>
+      <artifactId>agentlib-mosire</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.pf4j</groupId>
+      <artifactId>pf4j</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.github.c1589190</groupId>
+      <artifactId>brain-mosire</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>default-compile</id>
+            <configuration>
+              <proc>full</proc>
+              <annotationProcessorPaths>
+                <path>
+                  <groupId>org.pf4j</groupId>
+                  <artifactId>pf4j</artifactId>
+                  <version>${pf4j.version}</version>
+                </path>
+              </annotationProcessorPaths>
+              <annotationProcessors>
+                <annotationProcessor>org.pf4j.processor.ExtensionAnnotationProcessor</annotationProcessor>
+              </annotationProcessors>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Plugin-Id>search</Plugin-Id>
+              <Plugin-Version>${project.version}</Plugin-Version>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

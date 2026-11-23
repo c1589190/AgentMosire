@@ -2,6 +2,8 @@
 
 package io.github.c1589190.agentlib.plugin;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import io.github.c1589190.agentlib.permission.ResourceScopeMap;
 import io.github.c1589190.agentlib.tool.AgentTool;
 import io.github.c1589190.agentlib.tool.ToolRegistry;
 import java.io.IOException;
@@ -13,11 +15,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.stream.Stream;
 import org.pf4j.JarPluginManager;
+import org.pf4j.ManifestPluginDescriptorFinder;
+import org.pf4j.PluginDescriptor;
 import org.pf4j.PluginManager;
 import org.pf4j.PluginState;
 import org.pf4j.PluginWrapper;
@@ -86,6 +91,8 @@ import org.slf4j.LoggerFactory;
 public final class PluginToolSource implements AutoCloseable {
 
   private static final Logger LOG = LoggerFactory.getLogger(PluginToolSource.class);
+  private static final ManifestPluginDescriptorFinder DESCRIPTORS =
+      new ManifestPluginDescriptorFinder();
 
   /** 宿主内建源的 id（{@code App} 以 {@code new BuiltinToolSource("builtin", …)} 装配）；插件不得冒用，故列为保留名。 */
   public static final String HOST_BUILTIN_SOURCE_ID = "builtin";
@@ -94,7 +101,7 @@ public final class PluginToolSource implements AutoCloseable {
   private static final String JAR_SUFFIX = ".jar";
 
   /** R7 实测结论所依据的 PF4J 版本（写进文档便于复核，改动依赖版本时须重跑实测）。 */
-  private static final String PF4J_PROBE_VERSION = "3.15.1";
+  private static final String PF4J_PROBE_VERSION = "3.16.1";
 
   /** 保留名：宿主内建源 id —— 即使此刻 registry 里还没有内建工具，插件也不得占用（否则内建工具随后注册进来就会与插件同源）。 */
   private static final Set<String> RESERVED_SOURCE_IDS = Set.of(HOST_BUILTIN_SOURCE_ID);
@@ -131,6 +138,18 @@ public final class PluginToolSource implements AutoCloseable {
       PluginListener listener,
       Function<String, HostServices> hostServicesByPlugin) {
     return new PluginToolSource(pluginsDir, registry, listener, hostServicesByPlugin);
+  }
+
+  /** Use the running host version for PF4J's Plugin-Requires check. */
+  public static PluginToolSource withHostServices(
+      Path pluginsDir,
+      ToolRegistry registry,
+      PluginListener listener,
+      String systemVersion,
+      Function<String, HostServices> hostServicesByPlugin) {
+    var host = withHostServices(pluginsDir, registry, listener, hostServicesByPlugin);
+    host.plugins.setSystemVersion(systemVersion);
+    return host;
   }
 
   private PluginToolSource(
@@ -174,7 +193,7 @@ public final class PluginToolSource implements AutoCloseable {
    * PluginListener} 回调一次 {@code FAILED}（事件通道里"试过并失败"因此与"从未发现"可辨；描述符阶段失败的标识退化为 JAR 文件名，见 {@link
    * PluginListener#onStateChanged}）；失败的 JAR 不写进 {@link #list()}，故下次 {@link #loadAll()} 会重试并再回调一次。
    *
-   * @return 本次启用的 pluginId（按 jar 文件名序）
+   * @return 本次启用的 pluginId（按依赖顺序，同级按文件名）
    * @throws PluginLoadException 有任一插件装载失败（消息含全部失败项）
    * @throws IllegalStateException 已 {@link #close()}
    */
@@ -183,7 +202,7 @@ public final class PluginToolSource implements AutoCloseable {
       ensureOpen();
       List<String> enabled = new ArrayList<>();
       List<String> failures = new ArrayList<>();
-      for (Path jar : jars()) {
+      for (Path jar : dependencyOrder(jars())) {
         if (known(jar)) {
           LOG.debug("插件已在本实例清单里，跳过: {}", jar.getFileName());
           continue;
@@ -236,7 +255,7 @@ public final class PluginToolSource implements AutoCloseable {
       if (!entry.started()) {
         return;
       }
-      stopAndUnregister(entry);
+      stopWithDependents(entry);
     }
   }
 
@@ -270,7 +289,7 @@ public final class PluginToolSource implements AutoCloseable {
       closed = true;
       for (Entry entry : entries.values()) {
         if (entry.started()) {
-          stopAndUnregister(entry);
+          stopWithDependents(entry);
         }
       }
       // 兜底：把 PF4J 侧残留的插件全部卸载（本类清单之外的、被外部装载进来的）
@@ -279,6 +298,126 @@ public final class PluginToolSource implements AutoCloseable {
   }
 
   // ---------- 内部实现 ----------
+
+  /** 把受宿主绑定的 Agent 配置交给插件，并返回可重复清理的挂载句柄。 */
+  public Runnable attachAgent(String id, String parentId, String lineage, JsonNode settings) {
+    synchronized (lock) {
+      ensureOpen();
+      List<Runnable> cleanup = new ArrayList<>();
+      try {
+        for (PluginWrapper plugin : plugins.getResolvedPlugins()) {
+          Entry entry = entries.get(plugin.getPluginId());
+          if (entry != null && entry.started()) {
+            JsonNode input = settings == null ? null : settings.get(entry.pluginId());
+            cleanup.add(entry.source().attachAgent(new PluginAgent(id, parentId, lineage, input)));
+          }
+        }
+      } catch (RuntimeException | Error failure) {
+        detachAgent(cleanup);
+        throw failure;
+      }
+      return () -> {
+        synchronized (lock) {
+          detachAgent(cleanup);
+        }
+      };
+    }
+  }
+
+  private static void detachAgent(List<Runnable> cleanup) {
+    while (!cleanup.isEmpty()) {
+      try {
+        cleanup.removeLast().run();
+      } catch (RuntimeException failure) {
+        LOG.warn("插件 Agent 清理失败", failure);
+      }
+    }
+  }
+
+  /** Applies the resource ceilings from each active plugin. */
+  public ResourceScopeMap agentResourceLimits(String instanceId) {
+    synchronized (lock) {
+      ResourceScopeMap scopes = ResourceScopeMap.empty();
+      for (Entry entry : entries.values()) {
+        if (entry.started()) {
+          scopes = scopes.narrowTo(entry.source().agentResourceLimits(instanceId));
+        }
+      }
+      return scopes;
+    }
+  }
+
+  private static List<Path> dependencyOrder(List<Path> candidates) {
+    Map<String, Path> byId = new java.util.HashMap<>();
+    Map<Path, PluginDescriptor> descriptors = new java.util.HashMap<>();
+    for (Path jar : candidates) {
+      try {
+        PluginDescriptor descriptor = DESCRIPTORS.find(jar);
+        byId.putIfAbsent(descriptor.getPluginId(), jar);
+        descriptors.put(jar, descriptor);
+      } catch (RuntimeException failure) {
+        // 保留原扫描顺序，由装载入口发出该 JAR 的诊断和失败事件。
+      }
+    }
+    Set<Path> visited = new java.util.HashSet<>();
+    List<Path> ordered = new ArrayList<>();
+    for (Path jar : candidates) {
+      visit(jar, byId, descriptors, visited, ordered);
+    }
+    return ordered;
+  }
+
+  private static void visit(
+      Path jar,
+      Map<String, Path> byId,
+      Map<Path, PluginDescriptor> descriptors,
+      Set<Path> visited,
+      List<Path> ordered) {
+    if (!visited.add(jar)) {
+      return;
+    }
+    PluginDescriptor descriptor = descriptors.get(jar);
+    if (descriptor != null) {
+      for (var dependency : descriptor.getDependencies()) {
+        Path path = byId.get(dependency.getPluginId());
+        if (path != null) {
+          visit(path, byId, descriptors, visited, ordered);
+        }
+      }
+    }
+    ordered.add(jar);
+  }
+
+  private void stopWithDependents(Entry entry) {
+    if (!entries.get(entry.pluginId()).started()) {
+      return;
+    }
+    for (Entry other : entries.values()) {
+      if (other.started()
+          && !other.pluginId().equals(entry.pluginId())
+          && declaresDependency(other.pluginId(), entry.pluginId())) {
+        stopWithDependents(other);
+      }
+    }
+    stopAndUnregister(entry);
+  }
+
+  private boolean declaresDependency(String owner, String id) {
+    PluginWrapper plugin = plugins.getPlugin(owner);
+    return plugin != null
+        && plugin.getDescriptor().getDependencies().stream()
+            .anyMatch(dependency -> dependency.getPluginId().equals(id));
+  }
+
+  private Optional<?> dependencyService(String owner, String id, Class<?> type) {
+    synchronized (lock) {
+      Entry entry = entries.get(id);
+      if (entry == null || !entry.started() || !declaresDependency(owner, id)) {
+        return Optional.empty();
+      }
+      return entry.source().service(type);
+    }
+  }
 
   /** 目录里的插件 JAR（按文件名序，确定性；非 jar 文件忽略）。 */
   private List<Path> jars() {
@@ -316,6 +455,22 @@ public final class PluginToolSource implements AutoCloseable {
   private String startJar(Path jar) {
     String pluginId;
     try {
+      PluginDescriptor descriptor = DESCRIPTORS.find(jar);
+      for (var dependency : descriptor.getDependencies()) {
+        Entry entry = entries.get(dependency.getPluginId());
+        if (!dependency.isOptional() && (entry == null || !entry.started())) {
+          throw new IllegalStateException(
+              descriptor.getPluginId() + " 缺少已启动的依赖 " + dependency.getPluginId());
+        }
+        if (entry != null
+            && entry.started()
+            && !plugins
+                .getVersionManager()
+                .checkVersionConstraint(entry.version(), dependency.getPluginVersionSupport())) {
+          throw new IllegalStateException(
+              descriptor.getPluginId() + " 的依赖版本不匹配: " + dependency.getPluginId());
+        }
+      }
       pluginId = plugins.loadPlugin(jar);
     } catch (RuntimeException e) {
       // 实测：JAR 不可读/描述符非法 → 返回 null（只记日志）；而 Plugin-Id 与已装载插件重复 → 抛 PluginRuntimeException
@@ -375,13 +530,15 @@ public final class PluginToolSource implements AutoCloseable {
       String sourceId = requireUsableSourceId(pluginId, source.id(), jar);
       // 装载期注入宿主服务（早于 listTools()）：抛异常 = 本次装载失败，走下面的回滚 + FAILED + 响亮抛出。
       // 位置在归属校验之后：id 冒用的插件<b>不</b>该先被 init 一遍（那时它的工具就要被拒，init 是多余的副作用面）。
-      source.init(Objects.requireNonNull(hostServicesByPlugin.apply(pluginId), "插件宿主输入"));
+      HostServices services =
+          Objects.requireNonNull(hostServicesByPlugin.apply(pluginId), "插件宿主输入");
+      source.init(services.withDependencies((id, type) -> dependencyService(pluginId, id, type)));
       List<String> toolNames = registerTools(pluginId, sourceId, source.listTools());
       entries.put(pluginId, new Entry(pluginId, jar, version, sourceId, true, source));
       LOG.info("插件启用: {} v{} sourceId={} 工具 {} 个", pluginId, version, sourceId, toolNames.size());
       notifyListener(pluginId, version, PluginListener.State.STARTED);
       return pluginId;
-    } catch (RuntimeException e) {
+    } catch (RuntimeException | LinkageError e) {
       // 回滚：不留"已启动但未记清单"或"记了清单但工具没登记全"的半装载状态
       entries.remove(pluginId);
       rollback(pluginId, version, onlySource(sources));

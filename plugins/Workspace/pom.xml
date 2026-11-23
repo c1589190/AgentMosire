@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Modified for AgentMosire from the ProjectMosire source. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.c1589190</groupId>
+    <artifactId>agent-mosire-parent</artifactId>
+    <version>0.0.1-early</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>workspace-mosire</artifactId>
+  <name>Workspace</name>
+  <description>工作区标准：虚拟↔物理映射（Mount/Resolver）+ 唯一解析点鉴权 + 运行期挂载工具（mount_workspace/unmount_workspace/list_workspaces）+ 子工作区递归 + 生命周期与审计</description>
+
+  <dependencies>
+    <!-- 唯一生产依赖：权限模型（Operation/ResourceScope/AgentPermissionSet）、AgentTool 与工具骨架 -->
+    <dependency>
+      <groupId>io.github.c1589190</groupId>
+      <artifactId>agentlib-mosire</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <!-- 拒绝与装配留痕（物理路径只进日志与审计事件，见设计 §4.4 G4） -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+    <!-- SpotBugs 抑制注解：注入的 Consumer/Function 与 resolver 是"有意持有外部对象"的标记（编译期仅为注解），
+         与 AgentLibMosire/BrainMosire 同款 -->
+    <dependency>
+      <groupId>com.github.spotbugs</groupId>
+      <artifactId>spotbugs-annotations</artifactId>
+      <version>4.10.4</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.pf4j</groupId>
+      <artifactId>pf4j</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>default-compile</id>
+            <configuration>
+              <proc>full</proc>
+              <annotationProcessorPaths>
+                <path>
+                  <groupId>org.pf4j</groupId>
+                  <artifactId>pf4j</artifactId>
+                  <version>${pf4j.version}</version>
+                </path>
+              </annotationProcessorPaths>
+              <annotationProcessors>
+                <annotationProcessor>org.pf4j.processor.ExtensionAnnotationProcessor</annotationProcessor>
+              </annotationProcessors>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Plugin-Id>workspace</Plugin-Id>
+              <Plugin-Version>${project.version}</Plugin-Version>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

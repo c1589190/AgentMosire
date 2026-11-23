@@ -12,6 +12,7 @@ import io.github.c1589190.agentlib.permission.AgentPermissionSet;
 import io.github.c1589190.agentlib.permission.ResourceAuthorizer;
 import io.github.c1589190.agentlib.permission.ResourceDeniedException;
 import io.github.c1589190.agentlib.tool.AgentTool;
+import io.github.c1589190.agentlib.tool.ToolCallAuthorizer;
 import io.github.c1589190.agentlib.tool.ToolContext;
 import io.github.c1589190.agentlib.tool.ToolExecutionGuard;
 import io.github.c1589190.agentlib.tool.ToolRegistry;
@@ -142,8 +143,8 @@ public final class LocalDecisionCommitPort implements DecisionCommitPort {
           new ToolContext(who.caller(), who.permissions(), toolConfig, call.args(), who.identity());
       // 资源判定者与它注入后的上下文：闸位与工具体看到的是<b>同一个</b>（与 ToolCallAuthorizer 同形——
       // 工具若在 gate() 里读 context.resources()，拿到的就不是缺省的 denying()）
-      ResourceAuthorizer resources = ResourceAuthorizer.of(who.permissions(), tool.resources());
-      ToolContext scoped = context.withResources(resources);
+      ToolContext scoped = ToolCallAuthorizer.withResourceAuthorization(tool, context);
+      ResourceAuthorizer resources = scoped.resources();
       String failure = judgementFailure(tool, scoped, resources);
       if (failure != null) {
         // 判据链的前三段（裁定 13 补）：任何一段判否 ⇒ 这一条不执行，其余条目照常

@@ -2,7 +2,9 @@
 
 package io.github.c1589190.brain.subagent;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,7 +28,9 @@ public final class AgentTemplateStore {
   private final Path dir;
 
   /** 不可变快照（volatile 保证 reload 后的可见性）。 */
-  private volatile Map<String, AgentTemplate> snapshot = Map.of();
+  private volatile Map<String, Loaded> snapshot = Map.of();
+
+  private record Loaded(AgentTemplate template, JsonNode plugins) {}
 
   /**
    * @param dir 模板目录（含 {@code *.json} 文件）
@@ -45,10 +49,12 @@ public final class AgentTemplateStore {
     if (!Files.isDirectory(dir)) {
       throw new IllegalArgumentException("模板目录不存在或不是目录: " + dir);
     }
-    Map<String, AgentTemplate> loaded = new TreeMap<>();
+    Map<String, Loaded> loaded = new TreeMap<>();
     try (Stream<Path> files = Files.list(dir)) {
       files
           .filter(p -> Objects.requireNonNullElse(p.getFileName(), p).toString().endsWith(".json"))
+          .filter(
+              p -> !"main.json".equals(Objects.requireNonNullElse(p.getFileName(), p).toString()))
           .sorted()
           .forEach(p -> loadOne(p, loaded));
     } catch (IOException e) {
@@ -67,20 +73,37 @@ public final class AgentTemplateStore {
    * @return 命中的模板；装载前或无此 id 时为 empty
    */
   public Optional<AgentTemplate> get(String id) {
-    return Optional.ofNullable(snapshot.get(id));
+    return Optional.ofNullable(snapshot.get(id)).map(Loaded::template);
+  }
+
+  /** Plugin settings from the same installed template snapshot as the Agent configuration. */
+  public Optional<JsonNode> pluginSettings(String id) {
+    return Optional.ofNullable(snapshot.get(id))
+        .map(Loaded::plugins)
+        .map(value -> value.deepCopy());
   }
 
   /** 全量只读快照（按 id 排序；返回的 Map 不可变）。 */
   public Map<String, AgentTemplate> all() {
-    return snapshot;
+    Map<String, AgentTemplate> templates = new TreeMap<>();
+    snapshot.forEach((id, entry) -> templates.put(id, entry.template()));
+    return Map.copyOf(templates);
   }
 
-  private static void loadOne(Path file, Map<String, AgentTemplate> into) {
+  private static void loadOne(Path file, Map<String, Loaded> into) {
     String name = Objects.requireNonNullElse(file.getFileName(), file).toString();
     String stem = name.substring(0, name.length() - ".json".length());
     AgentTemplate template;
+    JsonNode plugins;
     try {
-      template = JSON.readValue(file.toFile(), AgentTemplate.class);
+      if (!(JSON.readTree(file.toFile()) instanceof ObjectNode object)) {
+        throw new IllegalArgumentException("模板必须是 JSON 对象: " + file);
+      }
+      plugins = object.remove("plugins");
+      if (plugins != null && !plugins.isObject()) {
+        throw new IllegalArgumentException("模板的 plugins 必须是 JSON 对象: " + file);
+      }
+      template = JSON.treeToValue(object, AgentTemplate.class);
     } catch (IOException e) {
       // Jackson 的解析错误/未知枚举/构造校验失败都走 IOException 家族——统一带上路径再抛
       throw new IllegalArgumentException("模板文件装载失败: " + file + "（" + e.getMessage() + "）", e);
@@ -89,6 +112,6 @@ public final class AgentTemplateStore {
       throw new IllegalArgumentException(
           "文件名 stem 与模板 id 不一致: 文件=" + file + " stem=" + stem + " id=" + template.id());
     }
-    into.put(template.id(), template);
+    into.put(template.id(), new Loaded(template, plugins));
   }
 }

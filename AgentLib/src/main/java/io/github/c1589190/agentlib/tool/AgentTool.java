@@ -3,6 +3,7 @@
 package io.github.c1589190.agentlib.tool;
 
 import io.github.c1589190.agentlib.permission.ResourceManifest;
+import io.github.c1589190.agentlib.permission.ResourceScopeMap;
 import io.github.c1589190.agentlib.permission.ToolSpec;
 import java.util.Map;
 import java.util.Objects;
@@ -167,6 +168,11 @@ public interface AgentTool {
    */
   default ResourceManifest resources() {
     return ResourceManifest.NONE;
+  }
+
+  /** Additional resource limits derived from trusted runtime state for this invocation. */
+  default ResourceScopeMap resourceLimits(ToolContext context) {
+    return ResourceScopeMap.empty();
   }
 
   /**

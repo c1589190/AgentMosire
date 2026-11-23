@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.github.c1589190.agentlib.config.ConfigStore;
 import io.github.c1589190.agentlib.llm.OpenAICompatibleLlmClient.ApiKeySource;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -15,13 +16,48 @@ public record HostServices(
     ConfigStore config,
     JsonNode settings,
     Map<String, ApiKeySource> credentials,
-    Set<String> excludedEnvironment) {
+    Set<String> excludedEnvironment,
+    Path pluginDirectory,
+    Path dataDirectory,
+    Dependencies dependencies) {
+
+  /** 查找已就绪且在描述符中声明的插件依赖。 */
+  @FunctionalInterface
+  public interface Dependencies {
+    Optional<?> find(String pluginId, Class<?> serviceType);
+  }
 
   @SuppressFBWarnings(value = "EI_EXPOSE_REP2", justification = "兼容旧入口，配置存储按约定由宿主共享。")
   public HostServices {
     settings = settings == null ? null : settings.deepCopy();
     credentials = Map.copyOf(credentials);
     excludedEnvironment = Set.copyOf(excludedEnvironment);
+    dependencies = dependencies == null ? (id, type) -> Optional.empty() : dependencies;
+  }
+
+  public HostServices(
+      ConfigStore config,
+      JsonNode settings,
+      Map<String, ApiKeySource> credentials,
+      Set<String> excludedEnvironment) {
+    this(config, settings, credentials, excludedEnvironment, null, null, null);
+  }
+
+  /** 保留宿主输入，附加当前插件允许查询的依赖服务。 */
+  public HostServices withDependencies(Dependencies resolver) {
+    return new HostServices(
+        config,
+        settings,
+        credentials,
+        excludedEnvironment,
+        pluginDirectory,
+        dataDirectory,
+        resolver);
+  }
+
+  /** 读取已初始化依赖所提供的服务。 */
+  public <T> Optional<T> dependency(String pluginId, Class<T> serviceType) {
+    return dependencies.find(pluginId, serviceType).map(serviceType::cast);
   }
 
   /** 兼容未指定工具进程环境排除项的宿主。 */
