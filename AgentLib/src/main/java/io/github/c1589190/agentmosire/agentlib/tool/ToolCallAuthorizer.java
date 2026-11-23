@@ -278,7 +278,7 @@ public final class ToolCallAuthorizer {
       // 走到这里 = 这一条真的要去执行了 ⇒ 把那张放行条记"已用"（重复使用 ⇒ 下一次具名拒）
       ledger.consumeRelease(release.get());
     }
-    ToolResult result = executeWithTimeout(tool, effective);
+    ToolResult result = executeWithTimeout(tool, effective, release.isPresent());
     registerQueuedByParent(result, tool, effective);
     return result;
   }
@@ -309,9 +309,12 @@ public final class ToolCallAuthorizer {
       justification =
           "工具 execute 抛出的运行时异常必须原样上抛（骨架不吞宿主 bug）；本方法只拆 FutureTask 的 ExecutionException，"
               + "不改变异常语义。")
-  private static ToolResult executeWithTimeout(AgentTool tool, ToolContext context) {
+  private static ToolResult executeWithTimeout(
+      AgentTool tool, ToolContext context, boolean approvedDecision) {
     long timeoutMillis = timeoutMillis(context);
-    FutureTask<ToolResult> task = new FutureTask<>(() -> tool.execute(context));
+    FutureTask<ToolResult> task =
+        new FutureTask<>(
+            () -> approvedDecision ? tool.executeApproved(context) : tool.execute(context));
     Thread.ofVirtual().name("mosire-tool-" + tool.name()).start(task);
     try {
       return task.get(timeoutMillis, TimeUnit.MILLISECONDS);

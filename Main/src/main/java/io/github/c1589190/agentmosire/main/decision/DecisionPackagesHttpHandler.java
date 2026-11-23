@@ -79,10 +79,10 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>判定顺序（先查后决，同审批面口径）</b>：{@code POST} 上 {@code find(id)} 为空且在途口也认不出 ⇒ 直接 {@code 404}；有值 ⇒ 解析
  * body ⇒ 交桥/在途口回填。桥抛的状态机具名拒按 {@code code} 映射状态码（{@code PACKAGE_NOT_FOUND}/{@code PACKAGE_EXPIRED} ⇒
- * 404、{@code PACKAGE_NOT_PROPOSED}/{@code ITEM_ALREADY_DECIDED} ⇒ 409、{@code
- * INVALID_DECISION}/{@code INVALID_ITEM_INDEX}/{@code NO_ITEM_DECIDED} ⇒ 400）；<b>认不出的拒码 ⇒
- * 500</b>（那是缺陷，不该伪装成"客户端写错了"）。提交侧的失败（{@code COMMIT_FAILED}）不走异常：裁决已生效、包只是没落定， 回执里用 {@code warning}
- * 说清楚。
+ * 404、{@code PACKAGE_NOT_PROPOSED}/{@code PACKAGE_NOT_DECIDED}/{@code ITEM_ALREADY_DECIDED} ⇒
+ * 409、{@code INVALID_DECISION}/{@code INVALID_ITEM_INDEX}/{@code NO_ITEM_DECIDED} ⇒ 400）；<b>认不出的拒码
+ * ⇒ 500</b>（那是缺陷，不该伪装成"客户端写错了"）。提交侧的失败（{@code COMMIT_FAILED}）不走异常：裁决已生效、包只是没落定， 回执里用 {@code
+ * warning} 说清楚。
  */
 public final class DecisionPackagesHttpHandler implements HttpHandler {
 
@@ -928,6 +928,7 @@ public final class DecisionPackagesHttpHandler implements HttpHandler {
               DecisionPackages.NO_ITEM_DECIDED ->
               400;
           case DecisionPackages.PACKAGE_NOT_PROPOSED,
+              DecisionPackages.PACKAGE_NOT_DECIDED,
               DecisionPackages.PARTIAL_DECISION,
               DecisionPackages.ITEM_ALREADY_DECIDED ->
               409;
@@ -940,7 +941,10 @@ public final class DecisionPackagesHttpHandler implements HttpHandler {
         switch (status) {
           case 404 -> "未知或已失效的决策包 id（含：已超时作废）";
           case 400 -> "裁决不合法：" + refusal.getMessage();
-          case 409 -> "该包已裁决或已终局（一次终局，重复决议不覆盖首次）";
+          case 409 ->
+              DecisionPackages.PACKAGE_NOT_DECIDED.equals(code)
+                  ? "决策包尚未裁决，无法提交执行"
+                  : "该包已裁决或已终局（一次终局，重复决议不覆盖首次）";
           default -> "裁决未生效（服务器侧异常）";
         };
     send(exchange, status, Map.of("error", message, "code", code));

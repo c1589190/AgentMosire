@@ -206,4 +206,9 @@ public interface AgentTool {
    * 执行一次调用。实现必须把参数、IO 错误映射为 {@link ToolResult}（成功或带 code 的失败）， 不抛异常吞掉边界错误（意外异常可抛，由审计记录后转为工具层错误）。
    */
   ToolResult execute(ToolContext context);
+
+  /** 执行已获批的决策条目。宿主先校验放行和执行边界，工具按实际执行结果返回回执所需状态。 */
+  default ToolResult executeApproved(ToolContext context) {
+    return execute(context);
+  }
 }

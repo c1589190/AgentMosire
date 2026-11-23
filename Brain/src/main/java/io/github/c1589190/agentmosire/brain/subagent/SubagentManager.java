@@ -1405,12 +1405,14 @@ public final class SubagentManager implements AutoCloseable {
       SubagentLaunchRequest request,
       String instanceId,
       AgentPermissionSet permissions) {
+    Set<String> allowed = new HashSet<>(permissions.allowedTools());
+    allowed.removeAll(permissions.deniedTools());
     AgentConfig.Builder builder =
         AgentConfig.builder(instanceId)
             .description(template.description())
             .systemPrompt(template.systemPrompt())
             .model(template.model())
-            .allowedTools(permissions.allowedTools())
+            .allowedTools(allowed)
             .deniedTools(permissions.deniedTools())
             .maxTurns(minCap(template.maxTurns(), request.maxTurnsCap(), parentConfig.maxTurns()))
             .maxToolCallsPerTurn(

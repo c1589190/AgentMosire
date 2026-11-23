@@ -2,6 +2,7 @@
 
 package io.github.c1589190.agentmosire.agentlib.agent;
 
+import io.github.c1589190.agentmosire.agentlib.permission.PermissionChecker;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.Set;
@@ -42,6 +43,7 @@ public record AgentConfig(
     Objects.requireNonNull(model, "model");
     allowedTools = Set.copyOf(allowedTools == null ? Set.of() : allowedTools);
     deniedTools = Set.copyOf(deniedTools == null ? Set.of() : deniedTools);
+    PermissionChecker.requireDisjointToolLists(allowedTools, deniedTools);
     Objects.requireNonNull(timeBudget, "timeBudget");
   }
 

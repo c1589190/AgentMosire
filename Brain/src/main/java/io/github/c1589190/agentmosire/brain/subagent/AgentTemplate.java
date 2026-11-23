@@ -11,6 +11,7 @@ import io.github.c1589190.agentmosire.agentlib.llm.LlmRequest;
 import io.github.c1589190.agentmosire.agentlib.llm.LlmResponse;
 import io.github.c1589190.agentmosire.agentlib.permission.AccessToken;
 import io.github.c1589190.agentmosire.agentlib.permission.AgentPermissionSet;
+import io.github.c1589190.agentmosire.agentlib.permission.PermissionChecker;
 import io.github.c1589190.agentmosire.agentlib.permission.ResourceScope;
 import io.github.c1589190.agentmosire.agentlib.permission.RoleSet;
 import io.github.c1589190.agentmosire.brain.permission.AgentRoles;
@@ -128,6 +129,7 @@ public record AgentTemplate(
     // 内联 Set.copyOf（同 AgentPermissionSet 的做法）：让 SpotBugs 看得见不可变来源
     allowedTools = allowedTools == null ? Set.of() : Set.copyOf(allowedTools);
     deniedTools = deniedTools == null ? Set.of() : Set.copyOf(deniedTools);
+    PermissionChecker.requireDisjointToolLists(allowedTools, deniedTools);
     script = script == null ? List.of() : List.copyOf(script);
     // allowedWorkingDirs 刻意<b>不</b>归一成空表：null（不限）与 []（哪里都不许）是两种取值，混成一个会静默放大权限。
     // 元素形态在这里不判（路径归一归 ResourceScope.ofDirs 管，坏值在装载期由它响亮失败）。

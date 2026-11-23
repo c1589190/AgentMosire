@@ -15,7 +15,7 @@ import java.util.TreeSet;
  * <ol>
  *   <li>denied 名单命中 → 拒绝（显式拒绝优先级最高）；
  *   <li>白名单存在且不命中（含通配） → 拒绝（deny-default）；
- *   <li>身份级别不足 → 拒绝（工具要求的级别只能由更高身份满足）；
+ *   <li>身份级别不足 → 拒绝（READONLY 点名获准的 DEFAULT 工具可以覆盖默认级别）；
  *   <li>角色不相交（工具声明了角色，且与调用者角色无交集） → 拒绝（第 8 维；先答"你是不是这个工具的人"，再答"你有没有资格碰这一档"）；
  *   <li>工具标记 sensitive/destructive 而权限集未显式放行 → 拒绝（终局拒绝，不走审批流—— ApprovalGate 在 M2 经 AG-UI 补）。
  * </ol>
@@ -23,6 +23,15 @@ import java.util.TreeSet;
 public final class PermissionChecker {
 
   private PermissionChecker() {}
+
+  /** 在合并多层权限前校验同一配置层的显式名单。 */
+  public static void requireDisjointToolLists(Set<String> allowedTools, Set<String> deniedTools) {
+    Set<String> overlap = new TreeSet<>(deniedTools);
+    overlap.retainAll(allowedTools);
+    if (!overlap.isEmpty()) {
+      throw new IllegalArgumentException("allowedTools 和 deniedTools 存在重复工具: " + overlap);
+    }
+  }
 
   /**
    * 判定一次调用；拒绝时返回原因，允许时返回空。
@@ -75,7 +84,12 @@ public final class PermissionChecker {
     if (!permissions.isToolAllowed(toolName)) {
       return Optional.of("工具 " + toolName + " 不在 allowed-tools 白名单内");
     }
-    if (!permissions.grantedToken().atLeast(s.requiredLevel())) {
+    boolean namedDefaultGrant =
+        permissions.grantedToken() == AccessToken.READONLY
+            && s.requiredLevel() == AccessToken.DEFAULT
+            && !AgentPermissionSet.ALL_TOOLS.equals(toolName)
+            && permissions.allowedTools().contains(toolName);
+    if (!permissions.grantedToken().atLeast(s.requiredLevel()) && !namedDefaultGrant) {
       return Optional.of(
           "身份级别不足：工具 "
               + toolName
@@ -159,7 +173,7 @@ public final class PermissionChecker {
    *
    * <ul>
    *   <li>身份级别：子级不可高于父级；
-   *   <li>白名单：父级通配（无限制）时子级任意；否则子级不得通配且其白名单 ⊆ 父级白名单 （子级空白名单=拒绝全部=更收缩，允许）；
+   *   <li>白名单：父级通配时子级可收窄。READONLY 父级的通配默认授权不能派生子级的点名覆盖；其余情况子级白名单必须被父级覆盖；
    *   <li>显式拒绝：父级拒绝集合 ⊆ 子级拒绝集合（子级不得重新放行父级禁止的工具）；
    *   <li>敏感/破坏放行：子级放行 ⇒ 父级也已放行；
    *   <li>只读：父级只读 ⇒ 子级必须只读（只读是收缩；子级主动更只读总是允许）；
@@ -183,7 +197,13 @@ public final class PermissionChecker {
     }
     // 白名单：父级通配时子级任意；否则子级不得通配且 ⊆ 父级
     if (parent.allowedTools().contains(AgentPermissionSet.ALL_TOOLS)) {
-      // 父级不设白名单限制 → 子级任意白名单（包括通配）都 ⊆ 父级，无需检查
+      if (parent.grantedToken() == AccessToken.READONLY
+          && !granted.readOnly()
+          && !granted.allowedTools().contains(AgentPermissionSet.ALL_TOOLS)
+          && !granted.deniedTools().containsAll(granted.allowedTools())) {
+        // 点名白名单会覆盖默认档位。此处没有工具规格，无法证明被点名工具只需 READONLY。
+        return false;
+      }
     } else {
       if (granted.allowedTools().contains(AgentPermissionSet.ALL_TOOLS)) {
         return false; // 子级通配 = 可用任意工具，超出父级白名单

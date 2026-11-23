@@ -153,7 +153,7 @@ public final class LocalDecisionCommitPort implements DecisionCommitPort {
       }
       ToolResult result;
       try {
-        result = tool.execute(scoped);
+        result = tool.executeApproved(scoped);
       } catch (ResourceDeniedException resourceDenied) {
         // 工具内命令式断言判否（require）：与唯一入口同口径转成资源拒绝的逐条理由
         notCommitted(
@@ -186,7 +186,7 @@ public final class LocalDecisionCommitPort implements DecisionCommitPort {
     }
     String reference = "batch:" + packageId;
     if (executed == 0) {
-      // 被批子集一条都没执行成功 = 这次裁决没有产生任何改动 ⇒ 零落盘（B-2 的同一侧）
+      // 没有条目报告执行成功。工具失败前已发生的部分操作不会由本机提交口回滚。
       return new CommitReceipt(
           CommitReceipt.Status.REJECTED,
           "",

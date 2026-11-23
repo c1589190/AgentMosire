@@ -158,6 +158,9 @@ public final class ShellTool implements AgentTool {
   /** 启动/IO 失败（如 {@code cwd} 不存在）——沿用既有约定码。 */
   public static final String LAUNCH_FAILED = "LAUNCH_FAILED";
 
+  /** 已获批命令以非零状态退出。 */
+  public static final String NONZERO_EXIT = "SHELL_NONZERO_EXIT";
+
   /** 超时未结束（已终止直接子进程）。 */
   public static final String TIMEOUT = "SHELL_TIMEOUT";
 
@@ -476,7 +479,8 @@ public final class ShellTool implements AgentTool {
         command, config.blockedExtra(), config.askExtra(), context.identity().mode());
   }
 
-  private ToolResult executeInWorkspace(ToolContext context, String command) {
+  private ToolResult executeInWorkspace(
+      ToolContext context, String command, boolean approvedDecision) {
     BashSandbox.Wrapped wrapped;
     Path directory;
     long timeout;
@@ -519,7 +523,7 @@ public final class ShellTool implements AgentTool {
       return ToolResult.error(SANDBOX_UNAVAILABLE, failure.getMessage());
     }
     try {
-      return runCommand(wrapped, directory, Map.of(), command, timeout, mode);
+      return runCommand(wrapped, directory, Map.of(), command, timeout, mode, approvedDecision);
     } finally {
       sandbox.cleanup(wrapped);
     }
@@ -590,13 +594,22 @@ public final class ShellTool implements AgentTool {
 
   @Override
   public ToolResult execute(ToolContext context) {
+    return execute(context, false);
+  }
+
+  @Override
+  public ToolResult executeApproved(ToolContext context) {
+    return execute(context, true);
+  }
+
+  private ToolResult execute(ToolContext context, boolean approvedDecision) {
     Objects.requireNonNull(context, "context");
     String command = strArg(context, "command");
     if (command == null) {
       return ToolResult.error(INVALID_ARGUMENTS, "command 为必填参数（非空命令字符串）");
     }
     if (workspace != null) {
-      return executeInWorkspace(context, command);
+      return executeInWorkspace(context, command, approvedDecision);
     }
 
     BashToolConfig config = configOf(context);
@@ -648,7 +661,8 @@ public final class ShellTool implements AgentTool {
           SANDBOX_UNAVAILABLE, "需要 OS 沙箱而它不可用（受限调用者不退回无围栏执行）: " + e.getMessage());
     }
     try {
-      return runCommand(wrapped, workingDirectory, env, command, timeoutSeconds, mode);
+      return runCommand(
+          wrapped, workingDirectory, env, command, timeoutSeconds, mode, approvedDecision);
     } finally {
       if (wrapped != null) {
         // 清理必须在包装进程结束之后：命名空间内删根会穿透 rw bind 删掉宿主源目录（BashSandbox 类 javadoc 记了这次实测）
@@ -700,7 +714,8 @@ public final class ShellTool implements AgentTool {
       Map<String, String> env,
       String command,
       long timeoutSeconds,
-      ShellOutputTruncator.Mode mode) {
+      ShellOutputTruncator.Mode mode,
+      boolean approvedDecision) {
     Process process;
     try {
       ProcessBuilder builder =
@@ -779,6 +794,9 @@ public final class ShellTool implements AgentTool {
     int exit = process.exitValue();
     if (workspace != null && exit == 125) {
       return ToolResult.error(SANDBOX_UNAVAILABLE, "无法完成工作区进程隔离");
+    }
+    if (approvedDecision && exit != 0) {
+      return ToolResult.error(NONZERO_EXIT, "命令以非零状态退出，exitCode: " + exit);
     }
     return completed(stdout, stderr, exit, mode);
   }
