@@ -12,4 +12,4 @@
 ## 3. 交付
 
 - [x] 3.1 `./mvnw -B -ntp -o -DskipTests install` 通过。整合包与薄包装载四个插件，启用 Search 后登记相同的 15 个插件工具。外部 Maven 示例通过新坐标运行。隔离复测覆盖 15 次场景和 34 次真实模型调用，结果保存在本地 `.work/`。
-- [ ] 3.2 提交并推送发布提交，创建 `0.0.1-early2` GitHub 预发布并核对标签和制品。
+- [x] 3.2 推送发布提交 `803ed5c`，创建 [0.0.1-early2 GitHub 预发布](https://github.com/c1589190/AgentMosire/releases/tag/0.0.1-early2)。核对标签及六个附件的 SHA-256，干净重建与实测制品一致。
