@@ -6,9 +6,9 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>io.github.c1589190</groupId>
+    <groupId>io.github.c1589190.agentmosire</groupId>
     <artifactId>agent-mosire-parent</artifactId>
-    <version>0.0.1-early</version>
+    <version>0.0.1-early2</version>
     <relativePath>../../pom.xml</relativePath>
   </parent>
 
@@ -19,14 +19,14 @@
   <dependencies>
     <!-- 权限模型（Operation/ResourceScope/AgentPermissionSet）、AgentTool 与工具骨架 -->
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>agentlib-mosire</artifactId>
       <version>${project.version}</version>
       <scope>provided</scope>
     </dependency>
     <!-- 虚拟路径 → 物理落点的唯一解析点（含准入鉴权），Docs 不自造第二处映射 -->
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>workspace-mosire</artifactId>
       <version>${project.version}</version>
       <scope>provided</scope>

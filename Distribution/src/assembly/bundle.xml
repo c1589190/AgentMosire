@@ -29,10 +29,10 @@
       <useTransitiveDependencies>false</useTransitiveDependencies>
       <useStrictFiltering>true</useStrictFiltering>
       <includes>
-        <include>io.github.c1589190:workspace-mosire</include>
-        <include>io.github.c1589190:docs-mosire</include>
-        <include>io.github.c1589190:search-mosire</include>
-        <include>io.github.c1589190:bash-plugin-mosire</include>
+        <include>io.github.c1589190.agentmosire:workspace-mosire</include>
+        <include>io.github.c1589190.agentmosire:docs-mosire</include>
+        <include>io.github.c1589190.agentmosire:search-mosire</include>
+        <include>io.github.c1589190.agentmosire:bash-plugin-mosire</include>
       </includes>
     </dependencySet>
   </dependencySets>

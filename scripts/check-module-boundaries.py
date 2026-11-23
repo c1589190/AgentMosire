@@ -11,9 +11,9 @@ from pathlib import Path
 
 POM_NS = {"m": "http://maven.apache.org/POM/4.0.0"}
 PROJECT_GROUPS = {
-    "io.github.c1589190", "${groupId}", "${project.groupId}", "${pom.groupId}", "${project.parent.groupId}",
+    "io.github.c1589190.agentmosire", "${groupId}", "${project.groupId}", "${pom.groupId}", "${project.parent.groupId}",
 }
-IMPORT = re.compile(r"^import\s+(?:static\s+)?io\.github\.c1589190\.([\w$]+)(?=[.;])", re.MULTILINE)
+IMPORT = re.compile(r"^import\s+(?:static\s+)?io\.github\.c1589190\.agentmosire\.([\w$]+)(?=[.;])", re.MULTILINE)
 MODULES = {
     "AgentLib": ("agentlib", {}),
     "Brain": ("brain", {"agentlib": "compile"}),
@@ -73,7 +73,7 @@ def check(root):
                     line = java.count("\n", 0, match.start()) + 1
                     problems.append(f"{source.relative_to(root)}:{line}: 越界 import {match.group(1)}")
     if not import_count:
-        problems.append("全仓没有读取到 io.github.c1589190 import")
+        problems.append("全仓没有读取到 io.github.c1589190.agentmosire import")
     return problems, source_count, import_count
 
 

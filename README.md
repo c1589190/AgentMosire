@@ -1,6 +1,6 @@
 # AgentMosire
 
-AgentMosire 是 Java Agent 运行时。首期版本为 `0.0.1-early`。
+AgentMosire 是 Java Agent 运行时。当前版本为 `0.0.1-early2`。
 
 | 模块 | 源码与测试 |
 | --- | --- |
@@ -31,7 +31,7 @@ java -jar Main/target/mosire.jar run --fake --no-mcp-expose --port 0 --data-dir 
 ## 插件与整合包
 
 - **薄包**使用 `Main/target/mosire.jar`。把各插件 `target/` 下的主制品 JAR 放入 `.agentmosire/plugins/`。Docs 和 Bash 都需要 Workspace。
-- **整合包**位于 `Distribution/target/agentmosire-0.0.1-early-bundle.zip`。从解压后的顶层目录运行 `java -jar mosire.jar run --fake --no-mcp-expose --port 0`。四个插件已经放在默认目录。
+- **整合包**位于 `Distribution/target/agentmosire-0.0.1-early2-bundle.zip`。从解压后的顶层目录运行 `java -jar mosire.jar run --fake --no-mcp-expose --port 0`。四个插件已经放在默认目录。
 - `--data-dir` 重定位数据根与默认插件目录。`config.json` 中的 `plugins.dir` 可显式指定其他插件目录。宿主只扫描目录顶层的 JAR，为每个插件提供 `plugins/<id>/config.json` 和同目录下的独立数据空间。
 
 在 `.agentmosire/plugins/workspace/config.json` 中命名可挂载的宿主目录。根必须存在，且与运行时数据及插件目录分离。
@@ -70,13 +70,13 @@ Search 的 `plugins/search/config.json` 可分别声明搜索和抓取。以下�
 
 ## Java 嵌入
 
-在根目录运行 `./mvnw -B -ntp install` 后，消费方可依赖 `io.github.c1589190:brain-mosire:0.0.1-early`。
+在根目录运行 `./mvnw -B -ntp install` 后，消费方可依赖 `io.github.c1589190.agentmosire:brain-mosire:0.0.1-early2`。
 
 ```java
-import io.github.c1589190.agentlib.agent.AgentConfig;
-import io.github.c1589190.agentlib.llm.LlmResponse;
-import io.github.c1589190.brain.runtime.AgentRuntime;
-import io.github.c1589190.brain.runtime.AgentSpec;
+import io.github.c1589190.agentmosire.agentlib.agent.AgentConfig;
+import io.github.c1589190.agentmosire.agentlib.llm.LlmResponse;
+import io.github.c1589190.agentmosire.brain.runtime.AgentRuntime;
+import io.github.c1589190.agentmosire.brain.runtime.AgentSpec;
 
 var spec = new AgentSpec(AgentConfig.builder("demo").build());
 try (var runtime = AgentRuntime.builder(spec, request -> LlmResponse.text("你好")).build()) {
@@ -84,7 +84,7 @@ try (var runtime = AgentRuntime.builder(spec, request -> LlmResponse.text("你�
 }
 ```
 
-会话窗口、压缩和注入由 Brain 管理。需要替换压缩策略时，实现 `io.github.c1589190.brain.compact.ContextCompactor` 并通过 `AgentRuntime.Builder.contextCompactor(...)` 装配。Main 使用同包的默认实现。
+会话窗口、压缩和注入由 Brain 管理。需要替换压缩策略时，实现 `io.github.c1589190.agentmosire.brain.compact.ContextCompactor` 并通过 `AgentRuntime.Builder.contextCompactor(...)` 装配。Main 使用同包的默认实现。
 
 ## 许可证与源码来源
 

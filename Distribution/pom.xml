@@ -4,40 +4,40 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <parent>
-    <groupId>io.github.c1589190</groupId>
+    <groupId>io.github.c1589190.agentmosire</groupId>
     <artifactId>agent-mosire-parent</artifactId>
-    <version>0.0.1-early</version>
+    <version>0.0.1-early2</version>
   </parent>
   <artifactId>agentmosire-distribution</artifactId>
   <packaging>pom</packaging>
   <name>AgentMosire Distribution</name>
   <dependencies>
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>main-mosire</artifactId>
       <version>${project.version}</version>
       <scope>runtime</scope>
     </dependency>
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>workspace-mosire</artifactId>
       <version>${project.version}</version>
       <scope>runtime</scope>
     </dependency>
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>docs-mosire</artifactId>
       <version>${project.version}</version>
       <scope>runtime</scope>
     </dependency>
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>search-mosire</artifactId>
       <version>${project.version}</version>
       <scope>runtime</scope>
     </dependency>
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>bash-plugin-mosire</artifactId>
       <version>${project.version}</version>
       <scope>runtime</scope>

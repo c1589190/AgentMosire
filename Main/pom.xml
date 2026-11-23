@@ -6,9 +6,9 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>io.github.c1589190</groupId>
+    <groupId>io.github.c1589190.agentmosire</groupId>
     <artifactId>agent-mosire-parent</artifactId>
-    <version>0.0.1-early</version>
+    <version>0.0.1-early2</version>
   </parent>
 
   <artifactId>main-mosire</artifactId>
@@ -17,12 +17,12 @@
 
   <dependencies>
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>brain-mosire</artifactId>
       <version>${project.version}</version>
     </dependency>
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>agentlib-mosire</artifactId>
       <version>${project.version}</version>
     </dependency>
@@ -117,7 +117,7 @@
                   <resource>META-INF/LICENSE.txt</resource>
                 </transformer>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                  <mainClass>io.github.c1589190.main.Main</mainClass>
+                  <mainClass>io.github.c1589190.agentmosire.main.Main</mainClass>
                 </transformer>
               </transformers>
               <filters>

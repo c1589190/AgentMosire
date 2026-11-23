@@ -6,22 +6,22 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>io.github.c1589190</groupId>
+    <groupId>io.github.c1589190.agentmosire</groupId>
     <artifactId>agent-mosire-parent</artifactId>
-    <version>0.0.1-early</version>
+    <version>0.0.1-early2</version>
     <relativePath>../../pom.xml</relativePath>
   </parent>
 
   <artifactId>bash-plugin-mosire</artifactId>
   <name>Bash</name>
-  <description>bash 工具插件（PF4J 插件，包 io.github.c1589190.bash）：打包时默认打包、调试时作为插件——只依赖 agentlib-mosire，不带任何宿主模块</description>
+  <description>bash 工具插件（PF4J 插件，包 io.github.c1589190.agentmosire.bash）：打包时默认打包、调试时作为插件——只依赖 agentlib-mosire，不带任何宿主模块</description>
 
   <dependencies>
     <!-- 插件 API（ToolSource/HostServices/AgentTool/ToolContext…）：设计 D1/D3 的硬规则是"插件 JAR 不打包宿主 API 的类"，
          运行时由宿主 classloader 解析——本模块用普通 jar 打包（不用 shade），依赖因此不会进 JAR，与 provided 等效。
          不用 provided：与 BrainMosire 的 pom 同款，reactor 内解析更直白（见 BrainMosire/pom.xml 对应条目）。 -->
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>agentlib-mosire</artifactId>
       <version>${project.version}</version>
       <scope>provided</scope>
@@ -51,10 +51,10 @@
       <scope>provided</scope>
     </dependency>
 
-    <!-- 测试面才允许依赖宿主模块（D1 的硬规则只管 compile 面：main 源集里 io.github.c1589190.brain.* 必须为 0）。
+    <!-- 测试面才允许依赖宿主模块（D1 的硬规则只管 compile 面：main 源集里 io.github.c1589190.agentmosire.brain.* 必须为 0）。
          8 个随迁用例里有端到端用例要装 AgentPipeline/BasicContextAssembler，属既有判据，不因搬家而降级。 -->
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>brain-mosire</artifactId>
       <version>${project.version}</version>
       <scope>test</scope>
@@ -71,7 +71,7 @@
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>io.github.c1589190</groupId>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>workspace-mosire</artifactId>
       <version>${project.version}</version>
       <scope>provided</scope>

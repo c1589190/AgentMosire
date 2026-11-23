@@ -1,0 +1,1048 @@
+// Modified for AgentMosire from the ProjectMosire source.
+
+package io.github.c1589190.agentmosire.bash;
+
+import io.github.c1589190.agentmosire.agentlib.approval.ToolGate;
+import io.github.c1589190.agentmosire.agentlib.permission.AccessToken;
+import io.github.c1589190.agentmosire.agentlib.permission.ResourceManifest;
+import io.github.c1589190.agentmosire.agentlib.permission.ResourcePolicy;
+import io.github.c1589190.agentmosire.agentlib.permission.ResourceScope;
+import io.github.c1589190.agentmosire.agentlib.permission.ResourceScopeMap;
+import io.github.c1589190.agentmosire.agentlib.permission.ToolSpec;
+import io.github.c1589190.agentmosire.agentlib.tool.AgentTool;
+import io.github.c1589190.agentmosire.agentlib.tool.Digest;
+import io.github.c1589190.agentmosire.agentlib.tool.SandboxMask;
+import io.github.c1589190.agentmosire.agentlib.tool.ToolContext;
+import io.github.c1589190.agentmosire.agentlib.tool.ToolResult;
+import io.github.c1589190.agentmosire.workspace.WorkspaceAccess;
+import io.github.c1589190.agentmosire.workspace.WorkspaceException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Bash 工具（二期 P2-5）：在受控工作目录下跑一条 shell 命令，把 {@code exitCode}/{@code stdout}/{@code stderr}
+ * 作为工具结果交回模型。
+ *
+ * <p><strong>执行模型（二期计划 §九.4 的落定）</strong>：工具级执行 = {@link ProcessBuilder}（{@code bash -c}），
+ * <b>不</b>接入 {@link io.github.c1589190.agentmosire.agentlib.proc.SubprocessManager}——那是子 Agent
+ * 进程生命周期的归属（心跳、进程树治理）。 本工具 <b>不发心跳、不做进程树清理</b>。已知取舍（不是遗漏）：命令自行派生的后代进程（如 {@code sleep 30 &}）在超时终止后
+ * <b>可能继续存活</b>，本工具不回收进程树；要"整棵树"的治理就得走子 Agent 级执行。
+ *
+ * <p><strong>红线 5 的边界</strong>（{@code AGENTS.md}：任何工具不能关进程）：Bash <b>不提供 kill 语义</b>——参数面没有
+ * kill/信号/PID 入口，也不存在"作用于任意进程"的接口（{@link #jsonSchema()} 由用例 pin 住）。超时或被中断时，本工具终止的只有
+ * <b>自己创建并持有的直接子进程</b>（{@link Process#destroyForcibly()}，仅该进程，不涉进程组、不涉进程树）；这是工具自身执行生命周期的
+ * 收尾——不终止则工具永久阻塞，那才是缺陷。
+ *
+ * <p><strong>输出裁剪三档</strong>（细节见 {@link ShellOutputTruncator}）：
+ *
+ * <ol>
+ *   <li>档 1 {@code maxOutputBytes}（缺省 1 MiB）= 采集期<b>字节</b>硬顶，读流时就压住，超限字节不入内存；
+ *   <li>档 2 进上下文的 head-tail 截断<b>复用</b> {@link
+ *       io.github.c1589190.agentmosire.agentlib.tool.ToolResultTruncator}（口径：UTF-16 字符）；
+ *   <li>档 3 {@code error-only} 模式：exit≠0 时只回 stderr 摘要（成功路径照常回显 stdout）。模式只改"什么进上下文"，
+ *       不改"什么被保存"——落库口径恒含两路输出。
+ * </ol>
+ *
+ * <p><strong>输出完整性（不许把"没读到"说成"没有输出"）</strong>：采集是增量发布的（读到一块算一块），读取线程在
+ * "直接子进程已回收且流静音"或"放弃后有界排空"时收手。收手时若没读到可观测范围的尽头，注入文本会带 {@code [输出可能不完整]} 披露行——静默的错误输出比报错更糟（本轮评审的
+ * Critical：后代占着管道时，命令明明打了输出， 却曾回报成"exitCode: 0 + 空输出"）。
+ *
+ * <p><strong>可观测边界（不回收进程树的代价）</strong>：直接子进程被 JDK 回收器回收的瞬间，管道读端就被关闭——回收<b>之前</b>
+ * 已在管道里的字节照常捕获（直接子进程自己写出的输出不会漏），但后代<b>此后</b>写出的字节再也读不到，且与"干净结束"不可区分
+ * （既无法捕获也无从逐条披露）。这正是"不回收进程树"取舍的代价；要治理这种输出得走子 Agent 级的进程树归属。
+ *
+ * <p><strong>退出码语义</strong>：非零退出是<b>成功</b>的 {@link ToolResult}（{@code code == null}）——命令确实跑完了，
+ * 模型需要看到输出才能推理；把非零退出做成错误码会让管线/审计把正常业务结果当成工具故障。{@code code != null} 表示<b>工具层失败</b>：
+ *
+ * <ul>
+ *   <li>{@link #INVALID_ARGUMENTS}：缺/空白 {@code command}；{@code timeout} 非正或非数字；{@code mode} 取值非法；
+ *       {@code env} 不是对象或值不是标量；{@code cwd} 路径字面非法；
+ *   <li>{@link #LAUNCH_FAILED}：进程启动失败（{@code cwd} 不存在/不可进入、可执行文件不可用等 IO 失败）；
+ *   <li>{@link #TIMEOUT}：超过 {@code timeout} 秒仍未结束（已终止直接子进程，消息里带已捕获的输出）；
+ *   <li>{@link #INTERRUPTED}：执行线程被中断（已终止直接子进程，中断标记归还调用方）；
+ *   <li>{@link #DIR_NOT_ALLOWED}：{@code cwd} 越出调用者的 fs 可达面（L1，命令未执行）；
+ *   <li>{@link #SANDBOX_UNAVAILABLE}：需要 L3 沙箱而它不可用（不发命令，不退化）；
+ *   <li>{@link #SKILL_SCOPE_UNFENCED}：需要遮蔽技能树而本次调用不会走沙箱（调用者看不见全部技能 + 不限可达面 + {@code
+ *       sandbox=off}）——同样不发命令（本能力新增，见 {@link SandboxMask}）。
+ * </ul>
+ *
+ * <p><strong>工作目录</strong>：构造注入基准目录（缺省 = JVM 当前目录），调用参数 {@code cwd} 可逐次覆盖（相对路径按基准目录解析）。
+ *
+ * <p><strong>配置从哪来（一处实现）</strong>：装载期注入（{@link #ShellTool(BashToolConfig)}，插件面经 {@link
+ * BashToolSource#init} 读并校验）优先；未注入（直接构造的老口径、离线单测）⇒ 现读 {@link ToolContext#config()} 并按缺省兜底。优先级只写在
+ * {@link #configOf} 一处。
+ *
+ * <p><strong>三层围栏（S5-D；分级口径见 {@code 设计-Bash工具与工作目录围栏.md} §2.1，别把这三层混着说）</strong>：
+ *
+ * <ol>
+ *   <li><b>L1 参数面硬拒</b>（{@link #DIR_NOT_ALLOWED}）：调用者带 fs 可达面（{@code
+ *       AgentPermissionSet#fsScope()}）时，{@code cwd} 的缺省值、相对路径基准、绝对路径与 {@code ..} 归一后的落点都必须落在可达面内；
+ *       越界 ⇒ 响亮错误码且<b>命令根本不执行</b>。另加一跳：候选目录<b>已存在</b>时按 realpath 再判一次（根在构造期已
+ *       realpath，链接指向面外会被看到）。<b>L1 不是安全边界</b>——命令文本里的绝对路径它一概不管（那需要 L3）；
+ *   <li><b>L2 起点固定</b>：相对路径与缺省 {@code cwd} 都从可达面首根起算，子进程由此出生在该根里。 <b>同样不是围栏</b>：拦不住 {@code cd
+ *       /}、绝对路径与 {@code bash -c 'cat /etc/shadow'}；
+ *   <li><b>L3 OS 沙箱</b>（{@link BashSandbox}）：受限调用者<b>一律</b>走沙箱（配置 {@code tools.bash.sandbox=off}
+ *       也管不着它）—— 没 bind 的宿主路径在沙箱里<b>不存在</b>，逃逸口（{@code mknod}/{@code mount}/再 {@code
+ *       chroot}/ptrace）关闭。沙箱不可用 ⇒ {@link #SANDBOX_UNAVAILABLE}，<b>绝不</b>静默退回无围栏执行。配置 {@code
+ *       require} 把不限可达面的调用者也一起沙箱化，其围栏面取 <b>工具基准工作目录</b>（它没有声明过可达面）。
+ * </ol>
+ *
+ * <p><b>技能树围栏（本能力新增，判定见 {@link SandboxMask}）</b>：宿主经 {@link ToolContext#config()} 下发“遮蔽面”
+ * （通常就是技能根）。沙箱运行时：调用者技能可见面覆盖整条路径 ⇒ 只读 bind（可读、写被 EROFS 挡下）；盖不住 ⇒ 用空目录盖住（沙箱内
+ * ENOENT）。<b>不会走沙箱</b>的调用遇到“该遮蔽却没有沙箱”的组合时响亮拒绝 （{@link #SKILL_SCOPE_UNFENCED}）——这是本工具对“技能根不得被 shell
+ * 绕过”这条硬边界的落点；没接线遮蔽面的部署 （{@code ToolContext.config} 里没有这一项）行为逐字不变。
+ *
+ * <p><b>披露面（诚实说明）</b>：L1/L2 是契约与误操作围栏，只有 L3 是安全意义上的围栏。设计底稿要求"L3 未启用时给受限调用者带一行披露"—— 裁决 ③
+ * 让这条分支<b>不可达</b>（受限调用者永远有沙箱，没沙箱就响亮失败），所以本类不写那句披露，改由沙箱的诚实边界 （{@link BashSandbox} 类注释：同 uid 信号仍可达、无
+ * {@code /proc} 等）与 {@code SANDBOX_UNAVAILABLE} 承担。
+ *
+ * <p><strong>环境变量</strong>：{@code env} 参数<b>叠加在继承环境之上</b>（同名覆盖，与 {@code
+ * ProcessBuilder.environment()} 从父进程继承一致的语义），不是替换整个环境。
+ *
+ * <p><strong>大输出落库</strong>：输出被裁（档 1 截断或档 2 超预算）时，把<b>采集到的完整文本</b>交给构造注入的 {@link
+ * OutputSink}，拿到的引用放进 {@link ToolResult#assetDocIds()}（既有字段）。缺省实现 {@link OutputSink#none()} 不落库； 真实
+ * EventStore 接线归 <b>P2-7</b>（与 App 装配同批；原计划写 T15，已由控制者裁决改归 P2-7）。落库是尽力而为：sink 抛异常只降级为"无引用"，不改变命令结果。
+ *
+ * <p><strong>token 预算</strong>：进上下文的文本（成功与失败两条路径）恒受 {@code maxInjectedChars} 约束——失败路径的命令回显
+ * 先收短再随整个消息过同一份预算（超时/中断可逐回合重现，整段照抄命令就是绕过预算的后门）；只有 {@link
+ * io.github.c1589190.agentmosire.agentlib.tool.ToolResultTruncator} 自己的截断提示允许单独超限（否则调用方分不清全量与残片）。
+ *
+ * <p>线程安全：实例不可变（字段全 final），{@link #execute} 可并发调用（每次调用各起各的直接子进程与两条读取线程）。仅 POSIX （固定 {@code bash
+ * -c}）。
+ */
+public final class ShellTool implements AgentTool {
+
+  private static final Logger LOG = LoggerFactory.getLogger(ShellTool.class);
+
+  /** 工具名（模型侧与权限白名单用的稳定标识）。 */
+  public static final String NAME = "bash";
+
+  static final String WORKSPACE_READ = "bash-read";
+  static final String WORKSPACE_WRITE = "bash-write";
+
+  @Override
+  public ResourceManifest resources() {
+    return workspace == null
+        ? ResourceManifest.NONE
+        : ResourceManifest.of(WORKSPACE_READ, ResourcePolicy.DENY);
+  }
+
+  @Override
+  public ResourceScopeMap resourceLimits(ToolContext context) {
+    return workspace == null
+        ? ResourceScopeMap.empty()
+        : workspace.registry().resourceLimits(context.identity().instanceId());
+  }
+
+  /** 缺省超时（秒）：够长到能跑完常规命令，又短到不会让一次误判把回合挂死。 */
+  public static final long DEFAULT_TIMEOUT_SECONDS = 60;
+
+  /** 参数非法（缺必填、取值非法）——沿用既有约定码。 */
+  public static final String INVALID_ARGUMENTS = "INVALID_ARGUMENTS";
+
+  /** 启动/IO 失败（如 {@code cwd} 不存在）——沿用既有约定码。 */
+  public static final String LAUNCH_FAILED = "LAUNCH_FAILED";
+
+  /** 超时未结束（已终止直接子进程）。 */
+  public static final String TIMEOUT = "SHELL_TIMEOUT";
+
+  /** 执行线程被中断（已终止直接子进程，中断标记归还调用方）。 */
+  public static final String INTERRUPTED = "SHELL_INTERRUPTED";
+
+  /** 工作目录越出调用者的可达面（L1；S5-D 新码）。 */
+  public static final String DIR_NOT_ALLOWED = "DIR_NOT_ALLOWED";
+
+  /** 需要沙箱而沙箱不可用（L3；S5-D 新码）——<b>响亮失败，绝不静默退回无围栏执行</b>。 */
+  public static final String SANDBOX_UNAVAILABLE = "SANDBOX_UNAVAILABLE";
+
+  /**
+   * 需要遮蔽技能树而本次调用不会走沙箱（本能力新码）：调用者看不见全部技能，却又在不限可达面 + {@code tools.bash.sandbox=off}
+   * 的组合下跑命令——命令一旦跑起来就能读/改它看不见的技能文件，技能边界在那一刻不存在。 <b>fail-closed</b>：不发命令，让模型/装配方去改可达面或沙箱配置，而不是静默放行。
+   */
+  public static final String SKILL_SCOPE_UNFENCED = "SKILL_SCOPE_UNFENCED";
+
+  /** 固定用 bash：工具名与语义一致（模型写 bash 语法应可用）；POSIX 之外不支持。 */
+  private static final String SHELL_EXECUTABLE = "bash";
+
+  /**
+   * {@code tool.call} 里 {@code digest} 的缺省占位：命令文本缺失/空白（参数还没通过校验）时用。
+   *
+   * <p>它不是摘要——真摘要恒以 {@code sha256:} 开头（见 {@link Digest}），两者不会混。写成"空串"或 {@code null} 才是坏的：
+   * 前者看起来像"摘了但摘出个空"，后者会破坏"args 是个对象"这条读取口径。
+   */
+  private static final String DIGEST_ABSENT = "none";
+
+  /** 无命令文本时 {@code class} 的取值：闭词表 {@code allow|ask|block} 之外的第四个值，专门表示"无从分类"。 */
+  private static final String CLASS_ABSENT = "none";
+
+  /** 读取线程的收尾宽限：直接子进程退出后，读取线程自行判定"流已静音"所需的时间上限（含安静窗口）。 */
+  private static final Duration READER_JOIN_GRACE = Duration.ofMillis(400);
+
+  /** 放弃读取后的收尾宽限：置位放弃后有界排空即退出——线程必须真的结束，"被放弃"就是泄漏。 */
+  private static final Duration ABANDON_JOIN_GRACE = Duration.ofMillis(400);
+
+  /** 强杀后的收殓宽限（SIGKILL 不可捕获，正常即返回）。 */
+  private static final Duration TERMINATE_GRACE = Duration.ofSeconds(5);
+
+  /** 工具声明的入参 schema（不可变，构造期算一次）。 */
+  private static final Map<String, Object> SCHEMA = buildSchema(false);
+
+  private static final Map<String, Object> WORKSPACE_SCHEMA = buildSchema(true);
+
+  private final Path baseWorkingDirectory;
+  private final OutputSink sink;
+  private final ShellOutputTruncator.Mode defaultMode;
+  private final int maxOutputBytes;
+  private final int maxInjectedChars;
+  private final BashSandbox sandbox;
+  private final Set<String> excludedEnvironment;
+  private final WorkspaceAccess workspace;
+
+  /**
+   * 装载期注入的配置（插件面）；{@code null} = 未注入——那时按调用上下文现读，见 {@link #configOf}。
+   *
+   * <p>不做防御性拷贝：{@link BashToolConfig} 的记录分量恒为不可变容器（构造期 {@code List.copyOf}），与 {@code SCHEMA} 同款理由。
+   */
+  private final BashToolConfig injectedConfig;
+
+  /**
+   * 大输出落库 SPI：把被裁掉的完整文本交给宿主（如事件库），返回可引用的 docId。
+   *
+   * <p>约定：返回非 null 的 {@link Optional}；{@link Optional#empty()} = 未落库（本阶段就是缺省行为）。实现抛异常视为落库失败，
+   * 调用方降级为"无引用"，不影响命令结果。为什么用注入而非 {@link ToolContext#config()}：落库是宿主能力（离线单测不该被事件库绑架）， 而 {@code
+   * config} 只承载"工具自身配置"；真实接线归 <b>P2-7</b>（原计划写 T15，已由控制者裁决改归 P2-7）。
+   */
+  public interface OutputSink {
+
+    /**
+     * 暂存一份完整输出。
+     *
+     * @param content 采集到的完整文本（已含 exitCode 与两路输出；档 1 丢弃的字节不在其中）
+     * @return 引用标识；空 = 未落库
+     */
+    Optional<String> store(String content);
+
+    /** 缺省实现：不落库（保证离线单测无需事件库）。 */
+    static OutputSink none() {
+      return content -> Optional.empty();
+    }
+  }
+
+  /** 缺省组装：JVM 当前目录为基准、不落库、normal 模式、1 MiB 采集顶、通用截断预算。 */
+  public ShellTool() {
+    this(
+        null,
+        Path.of("").toAbsolutePath(),
+        OutputSink.none(),
+        ShellOutputTruncator.Mode.NORMAL,
+        ShellOutputTruncator.DEFAULT_MAX_OUTPUT_BYTES,
+        ShellOutputTruncator.DEFAULT_MAX_INJECTED_CHARS,
+        BashSandbox.system());
+  }
+
+  /** 注入基准工作目录（其余取缺省）——避免行为隐式依赖进程 CWD。 */
+  public ShellTool(Path baseWorkingDirectory) {
+    this(
+        null,
+        baseWorkingDirectory,
+        OutputSink.none(),
+        ShellOutputTruncator.Mode.NORMAL,
+        ShellOutputTruncator.DEFAULT_MAX_OUTPUT_BYTES,
+        ShellOutputTruncator.DEFAULT_MAX_INJECTED_CHARS,
+        BashSandbox.system());
+  }
+
+  /**
+   * 装载期注入配置（插件面用：{@link BashToolSource#init} 在装载时读并校验，之后不再变）。
+   *
+   * <p>这条路上配置<b>已定型</b>：调用上下文里的 {@code config} 不再被读（{@link #configOf} 的优先级），其余取缺省组装。配置非 null
+   * ——插件面拿不到配置时由 {@link BashToolSource} 显式退化到 {@link
+   * BashToolConfig#defaults()}，不让"没配"和"配置为空"在构造器上混成一种。
+   */
+  public ShellTool(BashToolConfig config) {
+    this(config, Set.of());
+  }
+
+  ShellTool(BashToolConfig config, Set<String> excludedEnvironment) {
+    this(config, excludedEnvironment, null);
+  }
+
+  ShellTool(BashToolConfig config, Set<String> excludedEnvironment, WorkspaceAccess workspace) {
+    this(
+        Objects.requireNonNull(config, "config"),
+        Path.of("").toAbsolutePath(),
+        OutputSink.none(),
+        ShellOutputTruncator.Mode.NORMAL,
+        ShellOutputTruncator.DEFAULT_MAX_OUTPUT_BYTES,
+        ShellOutputTruncator.DEFAULT_MAX_INJECTED_CHARS,
+        workspace == null ? BashSandbox.system(excludedEnvironment) : BashSandbox.workspace(),
+        excludedEnvironment,
+        workspace);
+  }
+
+  public ShellTool(Path baseWorkingDirectory, OutputSink sink) {
+    this(
+        null,
+        baseWorkingDirectory,
+        sink,
+        ShellOutputTruncator.Mode.NORMAL,
+        ShellOutputTruncator.DEFAULT_MAX_OUTPUT_BYTES,
+        ShellOutputTruncator.DEFAULT_MAX_INJECTED_CHARS,
+        BashSandbox.system());
+  }
+
+  /** 注入缺省输出模式（调用参数 {@code mode} 仍可逐次覆盖）。 */
+  public ShellTool(
+      Path baseWorkingDirectory, OutputSink sink, ShellOutputTruncator.Mode defaultMode) {
+    this(
+        null,
+        baseWorkingDirectory,
+        sink,
+        defaultMode,
+        ShellOutputTruncator.DEFAULT_MAX_OUTPUT_BYTES,
+        ShellOutputTruncator.DEFAULT_MAX_INJECTED_CHARS,
+        BashSandbox.system());
+  }
+
+  /**
+   * 全量组装（测试与小预算场景用）；配置未注入 ⇒ 调用时现读上下文（{@link #configOf}）。
+   *
+   * @param baseWorkingDirectory 基准工作目录（非 null）
+   * @param sink 落库 SPI（非 null；{@link OutputSink#none()} = 不落库）
+   * @param defaultMode 缺省输出模式
+   * @param maxOutputBytes 档 1 采集字节顶（正数）
+   * @param maxInjectedChars 档 2 字符预算（正数）
+   */
+  public ShellTool(
+      Path baseWorkingDirectory,
+      OutputSink sink,
+      ShellOutputTruncator.Mode defaultMode,
+      int maxOutputBytes,
+      int maxInjectedChars) {
+    this(
+        null,
+        baseWorkingDirectory,
+        sink,
+        defaultMode,
+        maxOutputBytes,
+        maxInjectedChars,
+        BashSandbox.system());
+  }
+
+  /**
+   * 全量组装 + 指定沙箱（{@link BashSandbox#unavailable} 是"沙箱不可用 ⇒ 响亮失败"这条分支的构造用入口）；配置未注入 ⇒ 调用时现读上下文（{@link
+   * #configOf}）。
+   *
+   * @param sandbox L3 沙箱（非 null；{@link BashSandbox#system()} = 本机真探针）
+   */
+  public ShellTool(
+      Path baseWorkingDirectory,
+      OutputSink sink,
+      ShellOutputTruncator.Mode defaultMode,
+      int maxOutputBytes,
+      int maxInjectedChars,
+      BashSandbox sandbox) {
+    this(null, baseWorkingDirectory, sink, defaultMode, maxOutputBytes, maxInjectedChars, sandbox);
+  }
+
+  /**
+   * 唯一装配点（上面的构造器都是它的 {@code this(null, …)} 形态：{@code config == null} = 未注入）。
+   *
+   * @param config 装载期注入的配置；{@code null} = 未注入（调用时现读上下文）
+   */
+  private ShellTool(
+      BashToolConfig config,
+      Path baseWorkingDirectory,
+      OutputSink sink,
+      ShellOutputTruncator.Mode defaultMode,
+      int maxOutputBytes,
+      int maxInjectedChars,
+      BashSandbox sandbox) {
+    this(
+        config,
+        baseWorkingDirectory,
+        sink,
+        defaultMode,
+        maxOutputBytes,
+        maxInjectedChars,
+        sandbox,
+        Set.of(),
+        null);
+  }
+
+  private ShellTool(
+      BashToolConfig config,
+      Path baseWorkingDirectory,
+      OutputSink sink,
+      ShellOutputTruncator.Mode defaultMode,
+      int maxOutputBytes,
+      int maxInjectedChars,
+      BashSandbox sandbox,
+      Set<String> excludedEnvironment,
+      WorkspaceAccess workspace) {
+    this.injectedConfig = config;
+    this.sandbox = Objects.requireNonNull(sandbox, "sandbox");
+    this.excludedEnvironment = Set.copyOf(excludedEnvironment);
+    this.workspace = workspace;
+    this.baseWorkingDirectory =
+        Objects.requireNonNull(baseWorkingDirectory, "baseWorkingDirectory");
+    this.sink = Objects.requireNonNull(sink, "sink");
+    this.defaultMode = Objects.requireNonNull(defaultMode, "defaultMode");
+    if (maxOutputBytes <= 0) {
+      throw new IllegalArgumentException("maxOutputBytes 必须为正数: " + maxOutputBytes);
+    }
+    if (maxInjectedChars <= 0) {
+      throw new IllegalArgumentException("maxInjectedChars 必须为正数: " + maxInjectedChars);
+    }
+    this.maxOutputBytes = maxOutputBytes;
+    this.maxInjectedChars = maxInjectedChars;
+  }
+
+  /**
+   * 本次调用用的 bash 配置（<b>一处实现</b>，两条路的优先级写死在这里）：
+   *
+   * <ol>
+   *   <li>装载期注入（{@link #ShellTool(BashToolConfig)}，插件面的正路）：直接用——配置在那里已校验，调用期不再解读；
+   *   <li>未注入（直接构造的老口径、离线单测）：现读 {@code ToolContext.config}，{@link BashToolConfig#fromToolConfig}
+   *       的缺省兜底照旧。
+   * </ol>
+   *
+   * <p>{@code ToolContext} 的 config 恒非 null（构造期归一为 {@code Map.of()}），故第二条路上不判 null。
+   */
+  private BashToolConfig configOf(ToolContext context) {
+    return injectedConfig != null
+        ? injectedConfig
+        : BashToolConfig.fromToolConfig(context.config());
+  }
+
+  @Override
+  public String name() {
+    return NAME;
+  }
+
+  @Override
+  public String description() {
+    return "在受控工作目录下执行一条 shell 命令（bash -c），返回退出码与 stdout/stderr；"
+        + "大输出会被截断，非零退出不代表调用失败。破坏性操作：需显式放行。";
+  }
+
+  /** 返回对应执行模式的不可变参数定义。 */
+  @Override
+  public Map<String, Object> jsonSchema() {
+    return workspace == null ? SCHEMA : WORKSPACE_SCHEMA;
+  }
+
+  @Override
+  public ToolSpec spec() {
+    // 敏感 + 破坏：默认拒绝，需显式放行（工具自身不做权限判断，见类 Javadoc）
+    return ToolSpec.level(AccessToken.DEFAULT, true, true);
+  }
+
+  /**
+   * 三档分流（S4-C）：把命令交给 {@link BashCommandClassifier} 分类（直放 / 问人 / 硬拒）。
+   *
+   * <p><b>闸位只是分流，不是判定</b>：{@code Block} 由 {@code ToolCallAuthorizer} 转成 {@code COMMAND_BLOCKED} 且
+   * <b>不进审批</b>；{@code Ask} 由它去问人。工具<b>不</b>据此自行放行。
+   *
+   * <p>配置（追加条目 / 落账口径）从 {@code ToolContext.config} 读（D30 的运行时缝）：缺省 = 只用内置清单 + {@code digest}。
+   * 命令参数缺失时返回 {@code ALLOW}——没有命令文本就没有可分流的东西，{@link #execute} 会照常报 {@code INVALID_ARGUMENTS}。
+   */
+  @Override
+  public ToolGate gate(ToolContext context) {
+    Objects.requireNonNull(context, "context");
+    String command = strArg(context, "command");
+    if (command == null) {
+      return ToolGate.ALLOW;
+    }
+    BashToolConfig config = configOf(context);
+    // 档位来自**宿主绑定的调用者身份**（S6）：不完全权限档下"直放"档会被提升为需审批。
+    // 身份不由模型给（ToolContext.identity 由装配/建链方写），这里只读。
+    return BashCommandClassifier.classify(
+        command, config.blockedExtra(), config.askExtra(), context.identity().mode());
+  }
+
+  private ToolResult executeInWorkspace(ToolContext context, String command) {
+    BashSandbox.Wrapped wrapped;
+    Path directory;
+    long timeout;
+    ShellOutputTruncator.Mode mode;
+    try {
+      List<Path> readable = workspace.paths(context, NAME, WORKSPACE_READ, false);
+      if (readable.isEmpty()) {
+        return ToolResult.error(DIR_NOT_ALLOWED, "调用者没有可用于 Bash 的工作区");
+      }
+      List<Path> writable =
+          workspace.paths(context, NAME, WORKSPACE_WRITE, true).stream()
+              .filter(path -> readable.stream().anyMatch(path::startsWith))
+              .toList();
+      List<Path> readOnly =
+          readable.stream().filter(path -> writable.stream().noneMatch(path::startsWith)).toList();
+      if (workspace.readOnlyConflicts(context, NAME, writable)
+          || readOnly.stream().anyMatch(path -> writable.stream().anyMatch(path::startsWith))) {
+        return ToolResult.error(DIR_NOT_ALLOWED, "Bash 的只读与可写工作区重叠");
+      }
+      String cwd = strArg(context, "cwd");
+      directory = cwd == null ? readable.getFirst() : workspace.directory(context, cwd, NAME);
+      if (readable.stream().noneMatch(directory::startsWith)) {
+        return ToolResult.error(DIR_NOT_ALLOWED, "工作目录超出本次 Bash 调用范围");
+      }
+      if (!envArg(context, "env").isEmpty()) {
+        return ToolResult.error(INVALID_ARGUMENTS, "工作区 Bash 使用固定的隔离进程环境");
+      }
+      timeout = longArg(context, "timeout", DEFAULT_TIMEOUT_SECONDS);
+      if (timeout <= 0) {
+        return ToolResult.error(INVALID_ARGUMENTS, "timeout 必须为正数（秒）");
+      }
+      String modeArg = strArg(context, "mode");
+      mode = modeArg == null ? defaultMode : ShellOutputTruncator.Mode.parse(modeArg);
+      wrapped = sandbox.wrap(directory, writable, command, readOnly, List.of());
+    } catch (WorkspaceException failure) {
+      return ToolResult.error(DIR_NOT_ALLOWED, failure.getMessage());
+    } catch (IllegalArgumentException failure) {
+      return ToolResult.error(INVALID_ARGUMENTS, failure.getMessage());
+    } catch (BashSandbox.SandboxUnavailableException failure) {
+      return ToolResult.error(SANDBOX_UNAVAILABLE, failure.getMessage());
+    }
+    try {
+      return runCommand(wrapped, directory, Map.of(), command, timeout, mode);
+    } finally {
+      sandbox.cleanup(wrapped);
+    }
+  }
+
+  /**
+   * 落 {@code tool.call} 事件时的参数视图（S4-C 的脱敏点）：{@code digest}（缺省）下只暴露 {@code
+   * {digest,len,class}}，{@code full} 下原样返回。
+   *
+   * <p><b>为什么在这里而不是审批器里</b>：管线在<b>调 authorizer 之前</b>就落了 {@code tool.call}——脱敏落在审批器等于没落。
+   *
+   * <p><b>摘要口径</b>：用 {@link io.github.c1589190.agentmosire.agentlib.tool.Digest}（与审批摘要同一段代码，见其类
+   * javadoc）。这里<b>只</b>摘 {@code command} 一个字段（落账要的是"命令的指纹"），而审批摘要覆盖全部参数——输入面不同是有意的。
+   *
+   * <p><b>{@code env} 在 digest 模式下<b>整个不落</b></b>：它是模型自造的任意字符串、可能承载密钥（D23/D24）， 且它不进命令摘要。{@code
+   * cwd}/{@code timeout}/{@code mode} 不是命令文本，照原样落（取值域有限，不是任意字符串）。
+   *
+   * <p><b>诚实的边界（不许说成"加密"）</b>：{@code digest} 是<b>减少暴露面，不是保密</b>——短命令可被字典攻击还原； 要逐字回放请显式开 {@code
+   * tools.bash.commandLog=full}。
+   */
+  @Override
+  public Map<String, Object> ledgerArgs(ToolContext context) {
+    Objects.requireNonNull(context, "context");
+    BashToolConfig config = configOf(context);
+    if (config.commandLog() == BashToolConfig.CommandLog.FULL) {
+      return context.arguments();
+    }
+    Map<String, Object> out = new LinkedHashMap<>();
+    String command = strArg(context, "command");
+    if (command == null) {
+      // 没有命令文本：没有可摘的正文，也不编造分类（class=none 是闭词表外的第四个取值，专门表示"无从分类"）
+      out.put("digest", DIGEST_ABSENT);
+      out.put("len", 0);
+      out.put("class", CLASS_ABSENT);
+    } else {
+      // 落账的 class 与"实际怎么分流"同源（含档位提升）：不完全权限档下直放命令会落成 ask，别让账本比现实宽
+      ToolGate gate =
+          BashCommandClassifier.classify(
+              command, config.blockedExtra(), config.askExtra(), context.identity().mode());
+      out.put("digest", Digest.ofCommand(command));
+      out.put("len", command.length());
+      out.put("class", classOf(gate));
+    }
+    copyIfPresent(context, out, "cwd");
+    copyIfPresent(context, out, "timeout");
+    copyIfPresent(context, out, "mode");
+    return Map.copyOf(out);
+  }
+
+  /**
+   * {@code tool.call} 里 {@code class} 的取值（{@code allow|ask|block}；无命令文本时见 {@link #CLASS_ABSENT}）。
+   */
+  private static String classOf(ToolGate gate) {
+    return switch (gate) {
+      case ToolGate.Allow ignored -> "allow";
+      case ToolGate.Ask ignored -> "ask";
+      case ToolGate.Block ignored -> "block";
+    };
+  }
+
+  /** 把非命令文本的标量参数照原样带进事件（{@code cwd}/{@code timeout}/{@code mode}；{@code env} <b>不</b>带）。 */
+  private static void copyIfPresent(ToolContext context, Map<String, Object> out, String name) {
+    Object value = context.arguments().get(name);
+    if (value != null) {
+      out.put(name, value);
+    }
+  }
+
+  @Override
+  public ToolResult execute(ToolContext context) {
+    Objects.requireNonNull(context, "context");
+    String command = strArg(context, "command");
+    if (command == null) {
+      return ToolResult.error(INVALID_ARGUMENTS, "command 为必填参数（非空命令字符串）");
+    }
+    if (workspace != null) {
+      return executeInWorkspace(context, command);
+    }
+
+    BashToolConfig config = configOf(context);
+    // 围栏面（S5-D）：null = 三层围栏都不参与（不限 scope + sandbox=off）⇒ 行为与 S4-C 逐字相同
+    ResourceScope fence = fenceOf(context, config);
+    // 技能树围栏（本能力）：宿主经 ToolContext.config 下发遮蔽面；空表 = 未接线技能面 ⇒ 行为逐字不变。
+    // 判定规则只有一处（SandboxMask#fence）：可见面覆盖整条路径 ⇒ 只读暴露；盖不住（含未表态）⇒ 整条遮蔽。
+    SandboxMask.Fence skillFence = SandboxMask.fence(context.permissions(), context.config());
+    if (skillFence.sandboxRequired() && fence == null) {
+      LOG.warn(
+          "bash 需要遮蔽技能树却不会走沙箱（命令未执行）: 遮蔽面={} 调用者技能可达={}",
+          skillFence.masked(),
+          context.permissions().resourceScopes().summary());
+      return ToolResult.error(
+          SKILL_SCOPE_UNFENCED,
+          "本次调用的技能可见面不覆盖技能树，需要在 OS 沙箱内执行才能遮蔽它；但当前调用不会走沙箱"
+              + "（调用者 fs 可达面不限且 tools.bash.sandbox=off）。请给调用者配置受限工作目录"
+              + "（agents.workingDirs / 模板 allowedWorkingDirs / 请求 allowedDirs），"
+              + "或把 tools.bash.sandbox 设为 require；技能正文请改用技能工具读取。");
+    }
+
+    Path workingDirectory;
+    Map<String, String> env;
+    long timeoutSeconds;
+    ShellOutputTruncator.Mode mode;
+    try {
+      workingDirectory =
+          resolveWorkingDirectory(baseWorkingDirectory, strArg(context, "cwd"), fence);
+      env = envArg(context, "env");
+      timeoutSeconds = longArg(context, "timeout", DEFAULT_TIMEOUT_SECONDS);
+      if (timeoutSeconds <= 0) {
+        throw new IllegalArgumentException("timeout 必须为正数（秒）: " + timeoutSeconds);
+      }
+      String modeArg = strArg(context, "mode");
+      mode = modeArg == null ? defaultMode : ShellOutputTruncator.Mode.parse(modeArg);
+    } catch (DirNotAllowedException e) {
+      LOG.warn("bash 的 cwd 越出调用者可达面（命令未执行）: 可达面={} 拒因={}", fence.summary(), e.getMessage());
+      return ToolResult.error(DIR_NOT_ALLOWED, e.getMessage());
+    } catch (IllegalArgumentException e) {
+      return ToolResult.error(INVALID_ARGUMENTS, e.getMessage());
+    }
+
+    BashSandbox.Wrapped wrapped;
+    try {
+      wrapped = wrapInSandbox(fence, workingDirectory, command, skillFence);
+    } catch (BashSandbox.SandboxUnavailableException e) {
+      LOG.warn("bash 需要 OS 沙箱但沙箱不可用（命令未执行，不退回无围栏）: 可达面={} 原因={}", fence.summary(), e.getMessage());
+      return ToolResult.error(
+          SANDBOX_UNAVAILABLE, "需要 OS 沙箱而它不可用（受限调用者不退回无围栏执行）: " + e.getMessage());
+    }
+    try {
+      return runCommand(wrapped, workingDirectory, env, command, timeoutSeconds, mode);
+    } finally {
+      if (wrapped != null) {
+        // 清理必须在包装进程结束之后：命名空间内删根会穿透 rw bind 删掉宿主源目录（BashSandbox 类 javadoc 记了这次实测）
+        sandbox.cleanup(wrapped);
+      }
+    }
+  }
+
+  /**
+   * 本次调用要不要沙箱、可写面是哪几个根、技能树怎么处理。
+   *
+   * @return {@code null} = 不沙箱（不限 scope 且 {@code tools.bash.sandbox=off}）；调用方在此之前已按 {@link
+   *     SandboxMask.Fence#sandboxRequired()} 拒掉了“该遮蔽却没沙箱”的组合
+   */
+  private BashSandbox.Wrapped wrapInSandbox(
+      ResourceScope fence, Path workingDirectory, String command, SandboxMask.Fence skillFence) {
+    if (fence == null) {
+      return null;
+    }
+    return sandbox.wrap(
+        workingDirectory, fence.dirList(), command, skillFence.readOnly(), skillFence.masked());
+  }
+
+  /**
+   * 本次调用的围栏面（S5-D）：
+   *
+   * <ul>
+   *   <li>受限调用者 ⇒ 它的 {@code fs} 可达面（三层围栏都上，与 {@code tools.bash.sandbox} 的取值无关——见 {@link
+   *       BashToolConfig.Sandbox}）；
+   *   <li>不限 scope + {@code require} ⇒ <b>工具基准工作目录</b>当围栏面（它没声明过可达面，"整个文件系统"不是一份能绑的清单）；
+   *   <li>不限 scope + {@code off} ⇒ {@code null}（不判 cwd、不沙箱，行为与 S4-C 逐字相同）。
+   * </ul>
+   */
+  private ResourceScope fenceOf(ToolContext context, BashToolConfig config) {
+    ResourceScope fsScope = context.permissions().fsScope();
+    if (!fsScope.unrestricted()) {
+      return fsScope;
+    }
+    if (config.sandbox() == BashToolConfig.Sandbox.REQUIRE) {
+      return ResourceScope.ofDir(baseWorkingDirectory);
+    }
+    return null;
+  }
+
+  /** 真正跑命令：起进程、收输出、渲染结果（沙箱与否只差 {@code wrapped} 的 argv）。 */
+  private ToolResult runCommand(
+      BashSandbox.Wrapped wrapped,
+      Path workingDirectory,
+      Map<String, String> env,
+      String command,
+      long timeoutSeconds,
+      ShellOutputTruncator.Mode mode) {
+    Process process;
+    try {
+      ProcessBuilder builder =
+          new ProcessBuilder(
+              wrapped == null ? List.of(SHELL_EXECUTABLE, "-c", command) : wrapped.command());
+      builder.directory(workingDirectory.toFile());
+      if (workspace == null) {
+        builder.environment().putAll(env);
+        BashSandbox.excludeEnvironment(builder, excludedEnvironment);
+      } else {
+        builder.environment().clear();
+        builder
+            .environment()
+            .putAll(Map.of("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", "HOME", "/tmp", "LC_ALL", "C"));
+      }
+      builder.redirectErrorStream(false);
+      process = builder.start();
+    } catch (IOException e) {
+      // 命令明文不进持久面（D24 的同一条红线）：日志会被台架/部署落盘，这条线上只落"命令摘要"——与 tool.call
+      // 的落账摘要（ledgerArgs）同一段代码、同一个输入面，可由摘要反查那次调用；命令原文属于提示面（tty/HTTP）不属于日志面。
+      LOG.warn("bash 启动失败（命令摘要 {}）", Digest.ofCommand(command), e);
+      return ToolResult.error(LAUNCH_FAILED, "启动命令失败（工作目录或可执行文件不可用）: " + e.getMessage());
+    }
+
+    ReaderTask stdoutTask = new ReaderTask(process.getInputStream(), maxOutputBytes);
+    ReaderTask stderrTask = new ReaderTask(process.getErrorStream(), maxOutputBytes);
+    Thread stdoutReader = startReader(stdoutTask, "mosire-bash-stdout");
+    Thread stderrReader = startReader(stderrTask, "mosire-bash-stderr");
+
+    boolean exited = false;
+    boolean interrupted = false;
+    try {
+      exited = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      interrupted = true;
+    }
+    if (interrupted || !exited) {
+      // 红线 5 的边界：只终止本工具创建的直接子进程；后代进程可能存活（类 Javadoc 的取舍）
+      terminate(process);
+    }
+    // 直接子进程已不在：读取线程据此可在"流静音"时收手（JDK 回收进程时关掉管道读端，此前残留字节已搬进内存流）
+    if (!process.isAlive()) {
+      stdoutTask.markChildExited();
+      stderrTask.markChildExited();
+    }
+    boolean readersDone = joinQuietly(stdoutReader, READER_JOIN_GRACE);
+    readersDone &= joinQuietly(stderrReader, READER_JOIN_GRACE);
+    if (!readersDone) {
+      // 宽限已过仍未收尾（后代占着管道持续产出）：放弃并等它们真的退出——"被放弃"的线程就是线程泄漏
+      stdoutTask.abandon();
+      stderrTask.abandon();
+      joinQuietly(stdoutReader, ABANDON_JOIN_GRACE);
+      joinQuietly(stderrReader, ABANDON_JOIN_GRACE);
+    }
+    // 增量发布的快照：读取线程已结束（或已放弃并收尾），此刻即最终可观测结果
+    ShellOutputTruncator.Captured stdout = stdoutTask.snapshot();
+    ShellOutputTruncator.Captured stderr = stderrTask.snapshot();
+
+    if (interrupted) {
+      Thread.currentThread().interrupt(); // 中断标记归还调用方，不外吞
+      return ToolResult.error(
+          INTERRUPTED,
+          ShellOutputTruncator.renderAborted(
+              "命令执行被中断（已终止本工具创建的直接子进程；后代进程可能仍存活）", command, stdout, stderr, maxInjectedChars));
+    }
+    if (!exited) {
+      return ToolResult.error(
+          TIMEOUT,
+          ShellOutputTruncator.renderAborted(
+              "命令超时（" + timeoutSeconds + " 秒），已终止本工具创建的直接子进程（后代进程可能仍存活）",
+              command,
+              stdout,
+              stderr,
+              maxInjectedChars));
+    }
+    int exit = process.exitValue();
+    if (workspace != null && exit == 125) {
+      return ToolResult.error(SANDBOX_UNAVAILABLE, "无法完成工作区进程隔离");
+    }
+    return completed(stdout, stderr, exit, mode);
+  }
+
+  /** 命令跑完（exit 0 或非零）后的正常结果：非零退出同样是成功的 {@link ToolResult}，只是把 exitCode 写进消息。 */
+  private ToolResult completed(
+      ShellOutputTruncator.Captured stdout,
+      ShellOutputTruncator.Captured stderr,
+      int exitCode,
+      ShellOutputTruncator.Mode mode) {
+    ShellOutputTruncator.Rendered rendered =
+        ShellOutputTruncator.render(stdout, stderr, exitCode, mode, maxInjectedChars);
+    String message = rendered.injected();
+    List<String> assetDocIds = List.of();
+    boolean withheld = rendered.cutByBudget() || stdout.truncated() || stderr.truncated();
+    if (withheld) {
+      Optional<String> reference = persist(rendered.full());
+      if (reference.isPresent()) {
+        assetDocIds = List.of(reference.get());
+        // 引用行不可省（模型据此取全量），但也吃预算：先给它留出位置重截一次正文，保证"注入文本不超预算"这条不变量
+        String referenceLine = "\n[完整输出已暂存] 资产引用: " + reference.get();
+        int budget = Math.max(1, maxInjectedChars - referenceLine.length());
+        message =
+            ShellOutputTruncator.render(stdout, stderr, exitCode, mode, budget).injected()
+                + referenceLine;
+      }
+    }
+    return new ToolResult(null, message, assetDocIds);
+  }
+
+  /** 落库尽力而为：sink 抛异常只记为无引用（命令已跑完，不该因存储故障变成工具层失败）。 */
+  private Optional<String> persist(String content) {
+    try {
+      return sink.store(content);
+    } catch (RuntimeException e) {
+      LOG.warn("输出落库失败（命令结果不受影响）", e);
+      return Optional.empty();
+    }
+  }
+
+  /** 终止本工具持有的直接子进程（不涉进程组/树）；宽限后不再等待，避免收尾自身变成新的阻塞点。 */
+  private static void terminate(Process process) {
+    process.destroyForcibly();
+    try {
+      process.waitFor(TERMINATE_GRACE.toMillis(), TimeUnit.MILLISECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  /** 有界等待读取线程收尾；返回 true 表示线程已真的结束（不是"被放弃"）。 */
+  private static boolean joinQuietly(Thread reader, Duration grace) {
+    try {
+      reader.join(grace.toMillis());
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+    return !reader.isAlive();
+  }
+
+  /**
+   * 启动一条读取线程。<b>平台守护线程而非虚拟线程</b>：读取走 {@code available()} 轮询（见 {@link
+   * ShellOutputTruncator.Capture}），但底层仍是阻塞式管道 IO，虚拟线程一旦在其上阻塞就会 pin 住载体线程； 平台守护线程最坏是多一条闲置线程，且不拦 JVM
+   * 退出。
+   */
+  private static Thread startReader(ReaderTask task, String name) {
+    return Thread.ofPlatform().daemon().name(name).start(task);
+  }
+
+  /**
+   * 相对 {@code cwd} 按基准目录解析（基准目录就是"进程 CWD 的注入替身"）；带围栏面时走 L1 判定。
+   *
+   * <p><b>包级可见 + 纯函数</b>：L1 的取值语义要能脱开沙箱、确定性地测（沙箱是 L3 的事，L1 不该被"本机能不能建 mount 命名空间"绑架）。执行路径经 {@link
+   * #execute} 调用的是同一段代码，不存在"测的那份与跑的那份不是一个"。
+   *
+   * @param baseWorkingDirectory 基准目录（{@code fence == null} 时的相对路径基准与缺省 cwd）
+   * @param fence 可达面（{@code null} = 不判，见 {@link #fenceOf}）
+   * @throws DirNotAllowedException cwd 越出可达面（<b>命令不会被执行</b>）
+   */
+  static Path resolveWorkingDirectory(
+      Path baseWorkingDirectory, String rawCwd, ResourceScope fence) {
+    if (fence == null) {
+      if (rawCwd == null) {
+        return baseWorkingDirectory;
+      }
+      Path path = Path.of(rawCwd); // 字面非法 → InvalidPathException（IAE 子类）→ INVALID_ARGUMENTS
+      return path.isAbsolute() ? path : baseWorkingDirectory.resolve(path);
+    }
+    List<Path> roots = fence.dirList();
+    if (roots.isEmpty()) {
+      // 显式"哪里都不许"：没有可用的起始目录，任何 cwd（含缺省）都无从谈起
+      throw new DirNotAllowedException("调用者的可达面为空（哪里都不许）——bash 没有可用的工作目录: " + fence.summary());
+    }
+    Path base = roots.get(0); // L2：相对路径与缺省 cwd 都从首根起算
+    Path candidate;
+    if (rawCwd == null) {
+      candidate = base;
+    } else {
+      Path path = Path.of(rawCwd); // 字面非法 → INVALID_ARGUMENTS
+      candidate = path.isAbsolute() ? path : base.resolve(path);
+    }
+    Path normalized = candidate.toAbsolutePath().normalize(); // 『..』词法越界在这一跳就被折出来
+    if (!fence.allowsDir(normalized)) {
+      throw new DirNotAllowedException(
+          "cwd 越出调用者的可达面: 请求=" + rawCwd + " 解析=" + normalized + " 可达面=" + fence.summary());
+    }
+    // L1 的加严一跳：候选已存在时按 realpath 再判一次（根在构造期已 realpath，链接指向面外会被这一跳看到）。
+    // 完备的链接防线归 L3；这里只堵"cwd 本身是个指向面外的链接"。
+    Path real = realPathOrNull(normalized);
+    if (real != null && !fence.allowsDir(real)) {
+      throw new DirNotAllowedException(
+          "cwd 经符号链接解析后越出可达面: " + normalized + " → " + real + " 可达面=" + fence.summary());
+    }
+    return normalized;
+  }
+
+  /** 候选的 realpath（不存在/不可解析 ⇒ {@code null} = 这一跳不做判定，只留词法结论）。 */
+  private static Path realPathOrNull(Path path) {
+    try {
+      return Files.exists(path) ? path.toRealPath() : null;
+    } catch (IOException | SecurityException e) {
+      return null;
+    }
+  }
+
+  /** cwd 越出可达面（L1 的硬拒）：在 {@link #execute} 的边界上转成 {@link #DIR_NOT_ALLOWED}，不外泄。 */
+  private static final class DirNotAllowedException extends RuntimeException {
+
+    private static final long serialVersionUID = 1L;
+
+    DirNotAllowedException(String message) {
+      super(message);
+    }
+  }
+
+  private static Map<String, Object> buildSchema(boolean managedWorkspace) {
+    String modes =
+        Arrays.stream(ShellOutputTruncator.Mode.values())
+            .map(ShellOutputTruncator.Mode::wireName)
+            .collect(Collectors.joining(" / "));
+    Map<String, Object> properties =
+        new LinkedHashMap<>(
+            Map.of(
+                "command", Map.of("type", "string", "description", "要执行的 shell 命令（bash -c 语义）"),
+                "cwd",
+                    Map.of(
+                        "type",
+                        "string",
+                        "description",
+                        managedWorkspace
+                            ? "虚拟工作目录，例如 shared 或 shared/notes。缺省选择一个已授权目录。"
+                            : "工作目录；相对路径按基准目录解析，缺省 = 基准目录"),
+                "timeout",
+                    Map.of(
+                        "type",
+                        "integer",
+                        "description",
+                        "超时秒数（正整数，缺省 " + DEFAULT_TIMEOUT_SECONDS + "），超时即终止命令"),
+                "mode",
+                    Map.of(
+                        "type",
+                        "string",
+                        "enum",
+                        List.of("normal", "error-only"),
+                        "description",
+                        "输出模式（" + modes + "）；error-only 仅当退出码非 0 时只回 stderr")));
+    if (!managedWorkspace) {
+      properties.put(
+          "env",
+          Map.of(
+              "type",
+              "object",
+              "additionalProperties",
+              Map.of("type", "string"),
+              "description",
+              "追加或覆盖环境变量"));
+    }
+    return Map.of(
+        "type", "object",
+        "properties", Map.copyOf(properties),
+        "required", List.of("command"));
+  }
+
+  /**
+   * 一路输出的读取线程载体：{@link ShellOutputTruncator.Capture}（采集 + 增量发布）加上生命周期信号。
+   *
+   * <p>采集<b>不抛异常</b>、也<b>不依赖读到 EOF</b>（见 {@link ShellOutputTruncator.Capture}）：管道读端被后代占着时，
+   * 阻塞式读取会永久卡死——那是线程泄漏，而"读了才发布"会让工具把"没读到"谎报成"没有输出"。
+   */
+  private static final class ReaderTask implements Runnable {
+
+    private final InputStream stream;
+    private final ShellOutputTruncator.Capture capture;
+
+    private ReaderTask(InputStream stream, int maxBytes) {
+      this.stream = stream;
+      this.capture = new ShellOutputTruncator.Capture(maxBytes);
+    }
+
+    @Override
+    public void run() {
+      capture.pump(stream);
+    }
+
+    /** 直接子进程已退出：读取线程据此可在"流静音"时判定已读到尽头。 */
+    private void markChildExited() {
+      capture.markChildExited();
+    }
+
+    /** 放弃读取（宽限已过仍未收尾）：读取线程有界排空后即退出，其快照会带上"输出可能不完整"。 */
+    private void abandon() {
+      capture.abandon();
+    }
+
+    /** 随时可取（增量发布）：读取已结束或被放弃后取到的即最终可观测结果。 */
+    private ShellOutputTruncator.Captured snapshot() {
+      return capture.snapshot();
+    }
+  }
+
+  private static String strArg(ToolContext context, String name) {
+    Object value = context.arguments().get(name);
+    if (value == null) {
+      return null;
+    }
+    if (value instanceof String s) {
+      return s.isBlank() ? null : s;
+    }
+    return String.valueOf(value);
+  }
+
+  /** 整数参数：缺失 → 缺省值；存在但非数字 → 抛 IAE（调用方落地 {@code INVALID_ARGUMENTS}，绝不静默用缺省）。 */
+  private static long longArg(ToolContext context, String name, long defaultValue) {
+    Object value = context.arguments().get(name);
+    if (value == null) {
+      return defaultValue;
+    }
+    if (value instanceof Number n) {
+      return n.longValue();
+    }
+    try {
+      return Long.parseLong(String.valueOf(value).trim());
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException("参数 " + name + " 必须是整数（秒）: " + value);
+    }
+  }
+
+  /** 环境变量参数：必须是对象且值为标量（嵌套结构无法变成进程环境，属参数非法而非静默忽略）。 */
+  private static Map<String, String> envArg(ToolContext context, String name) {
+    Object value = context.arguments().get(name);
+    if (value == null) {
+      return Map.of();
+    }
+    if (!(value instanceof Map<?, ?> map)) {
+      throw new IllegalArgumentException("参数 " + name + " 必须是对象（键值均为标量）: " + value);
+    }
+    Map<String, String> env = new LinkedHashMap<>();
+    for (Map.Entry<?, ?> entry : map.entrySet()) {
+      Object item = entry.getValue();
+      if (item == null || item instanceof Map || item instanceof Collection) {
+        throw new IllegalArgumentException("参数 " + name + " 的值必须是标量: " + entry.getKey());
+      }
+      env.put(String.valueOf(entry.getKey()), String.valueOf(item));
+    }
+    return Map.copyOf(env);
+  }
+}

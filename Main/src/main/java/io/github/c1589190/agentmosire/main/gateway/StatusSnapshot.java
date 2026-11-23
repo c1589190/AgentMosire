@@ -1,0 +1,14 @@
+// Modified for AgentMosire from the ProjectMosire source.
+
+package io.github.c1589190.agentmosire.main.gateway;
+
+/** 健康/状态快照（AdminREST 的 /health 与 /api/status 数据源；App 自产）。 */
+public record StatusSnapshot(
+    String status, String artifact, String version, long pid, String agentId, long eventCount) {
+
+  public static StatusSnapshot healthy(
+      String artifact, String version, String agentId, long eventCount) {
+    return new StatusSnapshot(
+        "ok", artifact, version, ProcessHandle.current().pid(), agentId, eventCount);
+  }
+}
