@@ -46,21 +46,28 @@ public final class SpringTools {
 
             @Override
             public String call(String input) {
+                return call(input, null);
+            }
+
+            @Override
+            public String call(String input, ToolContext context) {
                 if (!active.getAsBoolean()) {
-                    return JsonValues.write(ToolResult.of(CANCELLED, "The turn has ended"));
+                    return JsonValues.write(ToolResult.of(CANCELLED, "The turn has ended").structuredContent());
                 }
                 Map<String, Object> arguments;
                 try {
                     arguments = JsonValues.parseObject(input);
                 } catch (RuntimeException invalidJson) {
-                    return JsonValues.write(ToolResult.of(INVALID_ARGUMENTS, "Expected a JSON object"));
+                    return JsonValues.write(ToolResult.of(INVALID_ARGUMENTS, "Expected a JSON object").structuredContent());
                 }
-                return JsonValues.write(invoker.invoke(id, arguments, caller, defer, active));
-            }
-
-            @Override
-            public String call(String input, ToolContext context) {
-                return call(input);
+                var result = invoker.invoke(id, arguments, caller, defer, active);
+                if (!result.images().isEmpty()) {
+                    result = context != null && context.getContext().get(SpringToolImages.CONTEXT_KEY)
+                            instanceof SpringToolImages.Attachments attachments
+                            ? attachments.add(id, result)
+                            : ToolResult.of(FAILED, "The caller has no image attachment transport");
+                }
+                return JsonValues.write(result.structuredContent());
             }
         };
     }

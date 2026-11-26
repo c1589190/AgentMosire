@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.AssistantMessage.ToolCall;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
@@ -29,6 +30,7 @@ import io.github.c1589190.agentmosire.tool.InvocationContext;
 import io.github.c1589190.agentmosire.tool.Resource;
 import io.github.c1589190.agentmosire.tool.ToolDefinition;
 import io.github.c1589190.agentmosire.tool.ToolId;
+import io.github.c1589190.agentmosire.tool.ToolImage;
 import io.github.c1589190.agentmosire.tool.ToolModule;
 import io.github.c1589190.agentmosire.tool.ToolResult;
 
@@ -42,6 +44,42 @@ class AgentRuntimeTest {
     private static final String SCHEMA = """
             {"type":"object","properties":{"item":{"type":"string"}},"required":["item"]}
             """;
+
+    @Test
+    void authorizedToolImagesReachTheNextSpringModelRequestInBothModes() {
+        byte[] bytes = {1, 2, 3};
+        var image = new ToolDefinition(READ, "Show reference image", SCHEMA, false,
+                args -> List.of(new Resource("item", (String) args.get("item"), "use")),
+                (caller, args) -> ALLOW,
+                (args, access) -> ToolResult.okImage("reference", new ToolImage("image/png", bytes)));
+        ToolModel model = new ToolModel() {
+            @Override
+            public ChatResponse call(Prompt prompt) {
+                if (results(prompt).isEmpty()) {
+                    return requested(AgentRuntimeTest.call("show", READ, "alpha"));
+                }
+                var attachment = assertInstanceOf(UserMessage.class, prompt.getInstructions().getLast());
+                assertTrue(attachment.getText().contains(READ.externalName()));
+                assertArrayEquals(bytes, assertInstanceOf(byte[].class, attachment.getMedia().getFirst().getData()));
+                assertFalse(results(prompt).getFirst().getResponses().getFirst().responseData().contains("AQID"));
+                return answer("saw image");
+            }
+
+            @Override
+            public Flux<ChatResponse> stream(Prompt prompt) {
+                return Flux.just(call(prompt));
+            }
+        };
+        var config = AgentConfig.of("editor", Set.of(READ), policy(new AtomicReference<>(Set.of("alpha"))),
+                (actor, pkg) -> false);
+        try (var agent = new AgentFactory(model).create(config, List.of(new ToolModule("catalog", List.of(image))));
+                var blocking = agent.openSession(); var streaming = agent.openSession()) {
+            assertEquals("saw image", blocking.chat("Show the reference").text());
+            var ended = JdkFlowAdapter.flowPublisherToFlux(streaming.stream("Show the reference"))
+                    .ofType(AgentEvent.Ended.class).single().block(Duration.ofSeconds(10));
+            assertEquals("saw image", ended.result().text());
+        }
+    }
 
     @Test
     void groupsAcrossModelRoundsAndExecutesApprovedSubsetOnlyOnce() {

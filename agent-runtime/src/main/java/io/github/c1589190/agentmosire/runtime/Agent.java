@@ -12,6 +12,8 @@ import org.springframework.ai.session.SessionAttributes;
 import org.springframework.ai.session.SessionService;
 
 import io.github.c1589190.agentmosire.runtime.decision.DecisionService;
+import io.github.c1589190.agentmosire.runtime.decision.DecisionReceipt;
+import io.github.c1589190.agentmosire.runtime.decision.DecisionStore;
 import io.github.c1589190.agentmosire.tool.ToolInvoker;
 
 public final class Agent implements AutoCloseable {
@@ -26,17 +28,20 @@ public final class Agent implements AutoCloseable {
     private final Map<UUID, AgentSession> sessions = new ConcurrentHashMap<>();
     private boolean closed;
 
-    Agent(AgentConfig config, ChatClient client, SessionService storage, ToolInvoker invoker) {
+    Agent(AgentConfig config, ChatClient client, SessionService storage, ToolInvoker invoker, DecisionStore store) {
         this.config = config;
         this.client = client;
         this.storage = storage;
         this.invoker = invoker;
-        decisions = new DecisionService(invoker, config.approvers(), receipt -> {
-            var codes = receipt.outcomes().entrySet().stream().collect(Collectors.toMap(
-                    Map.Entry::getKey, entry -> entry.getValue().code()));
-            emit(new AgentEvent.DecisionCommitted(id, receipt.packageId(), receipt.turnId(), receipt.version(),
-                    receipt.executionPrincipal(), receipt.submittedBy(), receipt.completedAt(), codes));
-        });
+        decisions = store == null ? new DecisionService(invoker, config.approvers(), this::emitReceipt)
+                : new DecisionService(invoker, config.approvers(), store);
+    }
+
+    private void emitReceipt(DecisionReceipt receipt) {
+        var codes = receipt.outcomes().entrySet().stream().collect(Collectors.toMap(
+                Map.Entry::getKey, entry -> entry.getValue().code()));
+        emit(new AgentEvent.DecisionCommitted(id, receipt.packageId(), receipt.turnId(), receipt.version(),
+                receipt.executionPrincipal(), receipt.submittedBy(), receipt.completedAt(), codes));
     }
 
     public UUID id() {

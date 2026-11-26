@@ -8,6 +8,8 @@
   <packaging>pom</packaging>
   <modules>
     <module>agent-tool</module>
+    <module>agent-workspace</module>
+    <module>agent-search</module>
     <module>agent-tool-spring-ai</module>
     <module>agent-runtime</module>
     <module>agent-harness</module>

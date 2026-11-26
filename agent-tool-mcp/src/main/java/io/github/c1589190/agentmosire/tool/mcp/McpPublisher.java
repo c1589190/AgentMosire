@@ -1,6 +1,7 @@
 package io.github.c1589190.agentmosire.tool.mcp;
 
 import java.util.List;
+import java.util.Base64;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -125,12 +126,13 @@ public final class McpPublisher implements AutoCloseable {
     }
 
     static McpSchema.CallToolResult result(ToolResult result) {
-        return McpSchema.CallToolResult.builder()
+        var response = McpSchema.CallToolResult.builder()
                 .addTextContent(result.message())
-                .structuredContent(Map.of("code", result.code().name(), "message", result.message(),
-                        "data", result.data()))
-                .isError(result.code() != ToolResult.Code.OK)
-                .build();
+                .structuredContent(result.structuredContent())
+                .isError(result.code() != ToolResult.Code.OK);
+        result.images().forEach(image -> response.addContent(
+                McpSchema.ImageContent.builder(Base64.getEncoder().encodeToString(image.bytes()), image.mimeType()).build()));
+        return response.build();
     }
 
     @Override

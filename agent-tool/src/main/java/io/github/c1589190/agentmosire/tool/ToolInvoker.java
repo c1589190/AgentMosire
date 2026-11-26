@@ -43,6 +43,16 @@ public final class ToolInvoker {
 
     public ToolResult invoke(ToolId tool, Map<String, ?> arguments, InvocationContext context,
             Predicate<DeferredCall> defer, BooleanSupplier active) {
+        return invoke(tool, arguments, context, defer, active, false);
+    }
+
+    /** Checks a stored decision against the current registry and policy without invoking its handler. */
+    public ToolResult checkApproved(ToolId tool, Map<String, ?> arguments, InvocationContext context) {
+        return invoke(tool, arguments, context, null, () -> true, true);
+    }
+
+    private ToolResult invoke(ToolId tool, Map<String, ?> arguments, InvocationContext context,
+            Predicate<DeferredCall> defer, BooleanSupplier active, boolean checkOnly) {
         if (context == null) {
             return ToolResult.of(DENIED, "A trusted caller is required");
         }
@@ -63,7 +73,7 @@ public final class ToolInvoker {
         } catch (RuntimeException invalidInput) {
             return ToolResult.of(INVALID_ARGUMENTS, "Expected valid JSON arguments");
         }
-        return evaluate(entry.definition(), snapshot, context, defer, false, active);
+        return evaluate(entry.definition(), snapshot, context, defer, checkOnly, active, checkOnly);
     }
 
     /**
@@ -75,11 +85,11 @@ public final class ToolInvoker {
         if (call.owner != this || !call.used.compareAndSet(false, true)) {
             return ToolResult.of(DENIED, "Approval is invalid or has already been used");
         }
-        return evaluate(call.tool, call.arguments, call.context, null, true, () -> true);
+        return evaluate(call.tool, call.arguments, call.context, null, true, () -> true, false);
     }
 
     private ToolResult evaluate(ToolDefinition tool, Map<String, Object> arguments, InvocationContext context,
-            Predicate<DeferredCall> defer, boolean approved, BooleanSupplier active) {
+            Predicate<DeferredCall> defer, boolean approved, BooleanSupplier active, boolean checkOnly) {
         if (!isVisible(tool.id(), context)) {
             return ToolResult.of(DENIED, "Tool is outside the caller's permissions");
         }
@@ -98,6 +108,9 @@ public final class ToolInvoker {
 
         if (verdict == ToolDefinition.Verdict.BLOCK) {
             return ToolResult.of(BLOCKED, "Tool policy blocked the call");
+        }
+        if (checkOnly) {
+            return ToolResult.ok("Current authorization permits this approved call");
         }
         if (verdict == ToolDefinition.Verdict.ASK && !approved) {
             if (defer == null) {
@@ -120,12 +133,22 @@ public final class ToolInvoker {
         }
     }
 
+    /** Binds issued calls to a single package at creation time. */
+    public synchronized void claimForPackage(List<DeferredCall> calls) {
+        if (new java.util.HashSet<>(calls).size() != calls.size() || calls.stream()
+                .anyMatch(call -> call.owner != this || call.used.get() || call.packaged)) {
+            throw new IllegalArgumentException("Every call must be unused and issued by this invoker");
+        }
+        calls.forEach(call -> call.packaged = true);
+    }
+
     public static final class DeferredCall {
         private final ToolInvoker owner;
         private final ToolDefinition tool;
         private final InvocationContext context;
         private final Map<String, Object> arguments;
         private final AtomicBoolean used = new AtomicBoolean();
+        private boolean packaged;
 
         private DeferredCall(ToolInvoker owner, ToolDefinition tool, InvocationContext context,
                 Map<String, Object> arguments) {

@@ -10,6 +10,18 @@
   <dependencies>
     <dependency>
       <groupId>io.github.c1589190.agentmosire</groupId>
+      <artifactId>agent-workspace</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.github.c1589190.agentmosire</groupId>
+      <artifactId>agent-search</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.github.c1589190.agentmosire</groupId>
       <artifactId>agent-runtime</artifactId>
       <version>${project.version}</version>
     </dependency>

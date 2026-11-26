@@ -18,6 +18,7 @@ import org.springframework.ai.session.advisor.SessionAdvisors;
 import io.github.c1589190.agentmosire.tool.ToolInvoker;
 import io.github.c1589190.agentmosire.tool.ToolModule;
 import io.github.c1589190.agentmosire.tool.ToolRegistry;
+import io.github.c1589190.agentmosire.runtime.decision.DecisionStore;
 
 public final class AgentFactory {
     private final ChatModel model;
@@ -40,6 +41,18 @@ public final class AgentFactory {
     }
 
     public Agent create(AgentConfig config, ToolRegistry registry) {
+        return assemble(config, registry, null);
+    }
+
+    public Agent create(AgentConfig config, Collection<ToolModule> modules, DecisionStore decisionStore) {
+        return create(config, new ToolRegistry(modules), decisionStore);
+    }
+
+    public Agent create(AgentConfig config, ToolRegistry registry, DecisionStore decisionStore) {
+        return assemble(config, registry, Objects.requireNonNull(decisionStore));
+    }
+
+    private Agent assemble(AgentConfig config, ToolRegistry registry, DecisionStore decisionStore) {
         if (model.getOptions() instanceof ToolCallingChatOptions options) {
             if (options.getToolCallbacks() != null && !options.getToolCallbacks().isEmpty()) {
                 throw new IllegalArgumentException("Register callbacks through the Agent tool registry, not model defaults");
@@ -57,10 +70,11 @@ public final class AgentFactory {
                 .build();
         var toolAdvisor = ToolCallingAdvisor.builder().toolCallingManager(manager);
         var builder = ChatClient.builder(model, observations, null, null, toolAdvisor)
-                .defaultAdvisors(SessionAdvisors.builder(sessions).build());
+                .defaultAdvisors(SessionAdvisors.builder(sessions).build())
+                .defaultAdvisors(new ToolImageAdvisor());
         if (!config.instructions().isBlank()) {
             builder.defaultSystem(config.instructions());
         }
-        return new Agent(config, builder.build(), sessions, new ToolInvoker(registry, config.policy()));
+        return new Agent(config, builder.build(), sessions, new ToolInvoker(registry, config.policy()), decisionStore);
     }
 }

@@ -23,6 +23,7 @@ import java.util.concurrent.Executor;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 
+import io.github.c1589190.agentmosire.tool.InvocationContext;
 import io.github.c1589190.agentmosire.tool.JsonValues;
 import io.github.c1589190.agentmosire.tool.ToolInvoker;
 import io.github.c1589190.agentmosire.tool.ToolResult;
@@ -32,7 +33,7 @@ import io.github.c1589190.agentmosire.runtime.decision.DecisionPackage.Verdict;
 
 import static io.github.c1589190.agentmosire.tool.ToolResult.Code.*;
 
-/** In-memory decision state for one agent. Identities are supplied by the trusted host. */
+/** Decision state for one agent or a host-managed scope. Identities come from the trusted host. */
 public final class DecisionService implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger(DecisionService.class.getName());
 
@@ -42,6 +43,7 @@ public final class DecisionService implements AutoCloseable {
     private final Clock clock;
     private final Executor executor;
     private final Consumer<DecisionReceipt> receiptListener;
+    private final DecisionStore store;
     private volatile boolean closed;
 
     public DecisionService(ToolInvoker invoker, BiPredicate<String, DecisionPackage> approvers) {
@@ -55,15 +57,29 @@ public final class DecisionService implements AutoCloseable {
 
     public DecisionService(ToolInvoker invoker, BiPredicate<String, DecisionPackage> approvers,
             Clock clock, Executor executor, Consumer<DecisionReceipt> receiptListener) {
+        this(invoker, approvers, clock, executor, receiptListener, null);
+    }
+
+    /** Enables host settlement and stores package snapshots independently of the agent lifetime. */
+    public DecisionService(ToolInvoker invoker, BiPredicate<String, DecisionPackage> approvers,
+            DecisionStore store) {
+        this(invoker, approvers, Clock.systemUTC(), Thread::startVirtualThread, ignored -> { },
+                Objects.requireNonNull(store));
+    }
+
+    private DecisionService(ToolInvoker invoker, BiPredicate<String, DecisionPackage> approvers,
+            Clock clock, Executor executor, Consumer<DecisionReceipt> receiptListener, DecisionStore store) {
         this.invoker = Objects.requireNonNull(invoker);
         this.approvers = Objects.requireNonNull(approvers);
         this.clock = Objects.requireNonNull(clock);
         this.executor = Objects.requireNonNull(executor);
         this.receiptListener = Objects.requireNonNull(receiptListener);
+        this.store = store;
     }
 
     public synchronized DecisionPackage open(UUID turnId, List<ToolInvoker.DeferredCall> calls, Duration ttl) {
         Objects.requireNonNull(turnId);
+        calls = List.copyOf(calls);
         if (closed) {
             throw new IllegalStateException("The decision service is closed");
         }
@@ -79,15 +95,20 @@ public final class DecisionService implements AutoCloseable {
             items.add(new PendingItem(new Item(items.size(), call.tool(), call.arguments(),
                     digest(call.arguments())), call));
         }
-        Entry entry = new Entry(UUID.randomUUID(), turnId, proposer.principal(), clock.instant().plus(ttl),
+        invoker.claimForPackage(calls);
+        Entry entry = new Entry(UUID.randomUUID(), proposer, clock.instant().plus(ttl),
                 List.copyOf(items));
         DecisionPackage opened = entry.snapshot();
-        packages.put(entry.id, entry);
+        if (store == null) {
+            packages.put(entry.id, entry);
+        } else if (!store.create(opened)) {
+            throw new IllegalStateException("Decision package ID already exists");
+        }
         return opened;
     }
 
     public Optional<DecisionPackage> find(UUID id, String viewer) {
-        Entry entry = packages.get(id);
+        Entry entry = load(id);
         if (entry == null) {
             return Optional.empty();
         }
@@ -113,31 +134,46 @@ public final class DecisionService implements AutoCloseable {
                 entry.version++;
                 entry.verdicts.clear();
             }
-            return entry.snapshot();
+            return save(entry);
         }
     }
 
     public DecisionPackage decideAll(UUID id, long expectedVersion, String approver, boolean approved) {
+        return decideAll(id, expectedVersion, approver, approved, "");
+    }
+
+    public DecisionPackage decideAll(UUID id, long expectedVersion, String approver, boolean approved, String note) {
         Entry entry = requirePackage(id);
         synchronized (entry) {
             requireApprover(approver, entry);
             requirePending(entry, expectedVersion);
-            Map<Integer, Boolean> votes = new LinkedHashMap<>();
+            Map<Integer, Verdict> votes = new LinkedHashMap<>();
             for (var item : entry.items) {
-                votes.put(item.item().index(), approved);
+                votes.put(item.item().index(), new Verdict(approved, approver, note));
             }
-            applyVotes(entry, approver, votes);
-            return entry.snapshot();
+            applyVotes(entry, votes);
+            return save(entry);
         }
     }
 
     public DecisionPackage decideItems(UUID id, long expectedVersion, String approver, Map<Integer, Boolean> votes) {
+        Map<Integer, Review> reviews = new LinkedHashMap<>();
+        votes.forEach((index, approved) -> reviews.put(index, new Review(approved, "")));
+        return reviewItems(id, expectedVersion, approver, reviews);
+    }
+
+    public record Review(boolean approved, String note) { }
+
+    public DecisionPackage reviewItems(UUID id, long expectedVersion, String approver, Map<Integer, Review> reviews) {
         Entry entry = requirePackage(id);
         synchronized (entry) {
             requireApprover(approver, entry);
             requirePending(entry, expectedVersion);
-            applyVotes(entry, approver, Map.copyOf(votes));
-            return entry.snapshot();
+            Map<Integer, Verdict> votes = new LinkedHashMap<>();
+            Map.copyOf(reviews).forEach((index, review) ->
+                    votes.put(index, new Verdict(review.approved(), approver, review.note())));
+            applyVotes(entry, votes);
+            return save(entry);
         }
     }
 
@@ -147,7 +183,7 @@ public final class DecisionService implements AutoCloseable {
             requireParticipant(requester, entry);
             expire(entry);
             cancel(entry);
-            return entry.snapshot();
+            return save(entry);
         }
     }
 
@@ -173,7 +209,151 @@ public final class DecisionService implements AutoCloseable {
         }
     }
 
+    /** Starts a new review version so a host can revise approvals after a failed preview. */
+    public DecisionPackage reopenReview(UUID id, long expectedVersion, String approver) {
+        requireHostSettlement();
+        Entry entry = requirePackage(id);
+        requireApprover(approver, entry);
+        expire(entry);
+        requireVersion(entry, expectedVersion);
+        if (entry.state != State.DECIDED) {
+            throw new IllegalStateException("Only a decided package can reopen review");
+        }
+        entry.version++;
+        entry.verdicts.clear();
+        entry.state = State.PENDING;
+        return save(entry);
+    }
+
+    public static final class CommitPlan {
+        private final DecisionService owner;
+        private final DecisionPackage snapshot;
+        private final String requester;
+
+        private CommitPlan(DecisionService owner, DecisionPackage snapshot, String requester) {
+            this.owner = owner;
+            this.snapshot = snapshot;
+            this.requester = requester;
+        }
+
+        public DecisionPackage snapshot() {
+            return snapshot;
+        }
+
+        public List<Item> calls() {
+            return snapshot.receipt() == null ? snapshot.items().stream()
+                    .filter(item -> snapshot.verdicts().get(item.index()).approved()).toList() : List.of();
+        }
+
+        public Optional<DecisionReceipt> receipt() {
+            return Optional.ofNullable(snapshot.receipt());
+        }
+    }
+
+    public record Completion(CommitPlan plan, Map<Integer, ToolResult> outcomes) {
+        public Completion(CommitPlan plan) {
+            this(plan, Map.of());
+        }
+
+        public Completion {
+            Objects.requireNonNull(plan);
+            outcomes = Map.copyOf(outcomes);
+        }
+    }
+
+    /** Previews authorized commands without claiming or executing them. */
+    public CommitPlan prepareCommit(UUID id, long expectedVersion, String requester) {
+        requireHostSettlement();
+        var entry = requirePackage(id);
+        requireApprover(requester, entry);
+        expire(entry);
+        requireVersion(entry, expectedVersion);
+        if (entry.state != State.DECIDED && entry.state != State.CLOSED) {
+            throw new IllegalStateException("Cannot prepare a package in state " + entry.state);
+        }
+        var plan = new CommitPlan(this, entry.snapshot(), requester);
+        checkCalls(plan);
+        return plan;
+    }
+
+    public DecisionReceipt completeCommit(CommitPlan plan, String revisionRef) {
+        return completeCommit(List.of(new Completion(plan)), revisionRef).getFirst();
+    }
+
+    /** Records receipts together, using the transaction or recovery contract of the host's store. */
+    public synchronized List<DecisionReceipt> completeCommit(List<Completion> completions, String revisionRef) {
+        requireHostSettlement();
+        completions = List.copyOf(completions);
+        if (completions.isEmpty() || Objects.requireNonNull(revisionRef).isBlank()) {
+            throw new IllegalArgumentException("A settlement needs plans and a business revision reference");
+        }
+        var ids = new HashSet<UUID>();
+        var updates = new ArrayList<DecisionStore.Update>();
+        var receipts = new ArrayList<DecisionReceipt>();
+        Instant completedAt = clock.instant();
+        for (var completion : completions) {
+            var plan = completion.plan();
+            var snapshot = plan.snapshot();
+            if (plan.owner != this || !ids.add(snapshot.id())) {
+                throw new IllegalArgumentException("Plans must be distinct and prepared by this service");
+            }
+            var entry = requirePackage(snapshot.id());
+            requireApprover(plan.requester, entry);
+            expire(entry);
+            requireVersion(entry, snapshot.version());
+            if (entry.state == State.CLOSED && revisionRef.equals(entry.receipt.revisionRef())) {
+                receipts.add(entry.receipt);
+                continue;
+            }
+            if (!snapshot.equals(entry.snapshot()) || entry.state != State.DECIDED) {
+                throw new IllegalStateException("Decision changed after the plan was prepared");
+            }
+            checkCalls(plan);
+            Set<Integer> approved = new HashSet<>();
+            plan.calls().forEach(item -> approved.add(item.index()));
+            if (!completion.outcomes().isEmpty() && (!completion.outcomes().keySet().equals(approved)
+                    || completion.outcomes().values().stream().anyMatch(outcome -> outcome.code() != OK))) {
+                throw new IllegalArgumentException("Successful results must match the approved items");
+            }
+            Map<Integer, ToolResult> outcomes = new LinkedHashMap<>();
+            for (var item : snapshot.items()) {
+                int index = item.index();
+                outcomes.put(index, approved.contains(index)
+                        ? completion.outcomes().getOrDefault(index, ToolResult.ok("Applied by the host"))
+                        : ToolResult.of(DENIED, "The item was not approved"));
+            }
+            var receipt = new DecisionReceipt(entry.id, entry.turnId, entry.version, entry.proposer,
+                    plan.requester, completedAt, outcomes, revisionRef);
+            entry.receipt = receipt;
+            entry.state = State.CLOSED;
+            updates.add(new DecisionStore.Update(entry.original, entry.snapshot()));
+            receipts.add(receipt);
+        }
+        if (!updates.isEmpty() && (updates.size() != completions.size() || !store.compareAndSet(updates))) {
+            throw new IllegalStateException("Settlement raced with another update or was only partially replayed");
+        }
+        return List.copyOf(receipts);
+    }
+
+    private void checkCalls(CommitPlan plan) {
+        for (var item : plan.calls()) {
+            if (!item.digest().equals(digest(item.arguments()))
+                    || invoker.checkApproved(item.tool(), item.arguments(), plan.snapshot().caller()).code() != OK) {
+                throw new SecurityException("An approved item no longer passes authorization: " + item.index());
+            }
+        }
+    }
+
+    private void requireHostSettlement() {
+        if (store == null || closed) {
+            throw new IllegalStateException("An open host-managed decision service is required");
+        }
+    }
+
     public CompletionStage<DecisionReceipt> commit(UUID id, String requester) {
+        if (store != null) {
+            throw new IllegalStateException("This agent uses host-managed settlement");
+        }
         Entry entry = requirePackage(id);
         synchronized (entry) {
             requireParticipant(requester, entry);
@@ -244,31 +424,51 @@ public final class DecisionService implements AutoCloseable {
         }
     }
 
-    private void applyVotes(Entry entry, String approver, Map<Integer, Boolean> votes) {
+    private void applyVotes(Entry entry, Map<Integer, Verdict> votes) {
         if (votes.isEmpty() || !entry.indices().containsAll(votes.keySet())) {
             throw new IllegalArgumentException("Verdicts must reference existing items");
         }
-        votes.forEach((index, approved) -> {
+        votes.forEach((index, verdict) -> {
             Verdict existing = entry.verdicts.get(index);
-            if (existing != null && existing.approved() != approved) {
+            if (existing != null && (existing.approved() != verdict.approved()
+                    || !existing.note().equals(verdict.note()))) {
                 throw new IllegalStateException("Item " + index + " already has a different verdict");
             }
         });
-        votes.forEach((index, approved) -> entry.verdicts.putIfAbsent(index, new Verdict(approved, approver)));
+        votes.forEach(entry.verdicts::putIfAbsent);
         if (entry.verdicts.size() == entry.items.size()) {
             entry.state = State.DECIDED;
         }
     }
 
     private Entry requirePackage(UUID id) {
-        return Optional.ofNullable(packages.get(id))
+        return Optional.ofNullable(load(id))
                 .orElseThrow(() -> new IllegalArgumentException("Unknown decision package"));
+    }
+
+    private Entry load(UUID id) {
+        return store == null ? packages.get(id) : store.find(id).map(Entry::new).orElse(null);
+    }
+
+    private DecisionPackage save(Entry entry) {
+        DecisionPackage next = entry.snapshot();
+        if (store != null && (closed || !store.compareAndSet(List.of(new DecisionStore.Update(entry.original, next))))) {
+            throw new IllegalStateException("Decision package changed or the service closed");
+        }
+        return next;
     }
 
     private void requirePending(Entry entry, long expectedVersion) {
         expire(entry);
-        if (entry.version != expectedVersion || entry.state != State.PENDING) {
+        requireVersion(entry, expectedVersion);
+        if (entry.state != State.PENDING) {
             throw new IllegalStateException("Decision package is not pending at version " + expectedVersion);
+        }
+    }
+
+    private static void requireVersion(Entry entry, long expectedVersion) {
+        if (entry.version != expectedVersion) {
+            throw new IllegalStateException("Decision package changed from version " + expectedVersion);
         }
     }
 
@@ -316,7 +516,9 @@ public final class DecisionService implements AutoCloseable {
         private final UUID id;
         private final UUID turnId;
         private final String proposer;
+        private final InvocationContext caller;
         private final Instant expiresAt;
+        private final DecisionPackage original;
         private final Map<Integer, Verdict> verdicts = new LinkedHashMap<>();
         private final CompletableFuture<DecisionReceipt> completion = new CompletableFuture<>();
         private List<PendingItem> items;
@@ -326,12 +528,28 @@ public final class DecisionService implements AutoCloseable {
         private String submittedBy;
         private DecisionReceipt receipt;
 
-        private Entry(UUID id, UUID turnId, String proposer, Instant expiresAt, List<PendingItem> items) {
+        private Entry(UUID id, InvocationContext caller, Instant expiresAt, List<PendingItem> items) {
             this.id = id;
-            this.turnId = turnId;
-            this.proposer = proposer;
+            this.turnId = caller.requestId();
+            this.proposer = caller.principal();
+            this.caller = caller;
             this.expiresAt = expiresAt;
             this.items = items;
+            this.original = null;
+        }
+
+        private Entry(DecisionPackage original) {
+            this.id = original.id();
+            this.turnId = original.turnId();
+            this.proposer = original.proposer();
+            this.caller = original.caller();
+            this.expiresAt = original.expiresAt();
+            this.items = original.items().stream().map(item -> new PendingItem(item, null)).toList();
+            this.original = original;
+            this.verdicts.putAll(original.verdicts());
+            this.state = original.state();
+            this.version = original.version();
+            this.receipt = original.receipt();
         }
 
         private Set<Integer> indices() {
@@ -344,7 +562,7 @@ public final class DecisionService implements AutoCloseable {
 
         private DecisionPackage snapshot() {
             return new DecisionPackage(id, turnId, proposer, version, expiresAt, state,
-                    items.stream().map(PendingItem::item).toList(), verdicts, receipt);
+                    items.stream().map(PendingItem::item).toList(), verdicts, receipt, caller);
         }
     }
 }

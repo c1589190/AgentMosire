@@ -3,10 +3,15 @@ package io.github.c1589190.agentmosire.tool.mcp;
 import java.net.URI;
 import java.util.Objects;
 
+import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.oauth2.core.OAuth2AuthenticationException;
 import org.springframework.security.oauth2.jwt.BadJwtException;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.server.resource.BearerTokenError;
+import org.springframework.security.oauth2.server.resource.BearerTokenErrorCodes;
+import org.springframework.security.oauth2.server.resource.web.BearerTokenAuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 
 /** Builds a security chain scoped to an explicitly published MCP endpoint. */
@@ -33,16 +38,24 @@ public final class McpHttpSecurity {
             return token;
         };
         String metadataPath = METADATA + resource.getPath();
-        return http.securityMatcher(options.endpoint(), METADATA, metadataPath)
+        String metadataUri = resource.resolve(metadataPath).toASCIIString();
+        var challenge = new BearerTokenAuthenticationEntryPoint();
+        challenge.setResourceMetadataParameterResolver(request -> metadataUri);
+        var insufficientScope = new BearerTokenError(BearerTokenErrorCodes.INSUFFICIENT_SCOPE,
+                HttpStatus.FORBIDDEN, "This MCP resource requires an additional scope", null, options.requiredScope());
+        return http.securityMatcher(options.endpoint(), metadataPath)
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .csrf(csrf -> csrf.ignoringRequestMatchers(options.endpoint()))
-                .authorizeHttpRequests(auth -> auth.requestMatchers(METADATA, metadataPath).permitAll()
+                .authorizeHttpRequests(auth -> auth.requestMatchers(metadataPath).permitAll()
                         .anyRequest().hasAuthority("SCOPE_" + options.requiredScope()))
-                .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> jwt.decoder(boundDecoder))
+                .oauth2ResourceServer(oauth -> oauth.authenticationEntryPoint(challenge)
+                        .accessDeniedHandler((request, response, denied) -> challenge.commence(request, response,
+                                new OAuth2AuthenticationException(insufficientScope)))
+                        .jwt(jwt -> jwt.decoder(boundDecoder))
                         .protectedResourceMetadata(metadata -> metadata.protectedResourceMetadataCustomizer(
                                 builder -> builder.resource(resource.toString())
                                         .authorizationServer(authorizationServer.toString())
-                                        .scope(options.requiredScope()).bearerMethod("header"))))
+                                        .scope(options.requiredScope()))))
                 .build();
     }
 

@@ -20,6 +20,8 @@
 | `agent-tool-spring-ai` | `tool.springai` 把受控工具适配成 `ToolCallback`，并将显式引入的 Spring AI `@Tool` 或 `ToolCallback` 包装为工具贡献。 | 依赖 `agent-tool` 与 Spring AI 工具 API。已有 Spring AI Agent 的宿主可直接选用此模块。 |
 | `agent-runtime` | `runtime` 管理 `AgentFactory`、实例、会话和回合。`runtime.decision` 管理决策包、审批、执行计划与回执。 | 依赖工具库及 Spring AI 适配。使用官方 ChatClient、模型和 Session API，Maven 使用者自行选择模型提供方。 |
 | `agent-tool-mcp` | `tool.mcp` 提供只发布指定工具的 MCP 服务配置与结果映射。后续将外部 MCP 工具导入为工具贡献。 | 依赖工具库、Spring AI MCP WebMVC 传输、Java SDK 和 Spring Security。可以独立于 `agent-runtime` 部署。 |
+| `agent-workspace` | `workspace` 将宿主授权的目录挂载为虚拟路径供工具使用。 | 可选工具包。使用 JDK 的安全目录操作与 `agent-tool`。 |
+| `agent-search` | `search` 提供网页搜索、抓取与 DeepSeek 客户端。 | 可选工具包。使用 JDK HTTP Client、Jackson 和 `agent-tool`。 |
 
 ```text
 Java tool package --> agent-tool <-- agent-tool-spring-ai <-- agent-runtime
@@ -40,7 +42,7 @@ Java tool package --> agent-tool <-- agent-tool-spring-ai <-- agent-runtime
 | `ToolDefinition` | 描述稳定 ID、Schema、业务执行器、所需资源及 MCP 导出资格。作者可以由 Java 或 Spring AI 回调规范生成描述。 |
 | `ToolInvoker` | 校验参数，取得当前工具定义，依据可信身份、Agent 工具范围、工具与资源权限及工具闸位得出 `Allow`、`Block` 或 `Ask`，按结果执行或返回。 |
 | `InvocationContext` | 由 Java 宿主或 MCP 身份适配器构造。记录主体、Agent 或服务范围、请求 ID 和可选回合引用。模型生成的输入只用于业务参数。 |
-| `ToolResult` | 提供机器可读结果码，附带受控文本和可选结构化内容。调用方能区分成功、拒绝、等待裁决、工具失败及结果未知。 |
+| `ToolResult` | 提供机器可读结果码，附带受控文本、可选结构化内容和图片附件。调用方能区分成功、拒绝、等待裁决、工具失败及结果未知。 |
 
 目录可见性用于生成模型工具列表和 MCP 服务面。真正调用时从当前策略重新校验身份、工具和资源。无策略、上下文缺失或校验失败时拒绝。硬拒直接终止。`Ask` 将已解析、已规范化的调用交给装配时指定的审批处理方式，缺少审批处理方式时返回 `APPROVAL_REQUIRED`。批准只能解除同一条调用的 `Ask`，执行前仍须复核权限、资源、工具定义和硬拒。通过同一个受控调用器进入业务实现，批准材料从宿主状态中读取。
 
@@ -56,6 +58,8 @@ Java tool package --> agent-tool <-- agent-tool-spring-ai <-- agent-runtime
 
 同步和流式时序都先使用标准 Advisor 验证。若只有某个回调点无法满足，使用公开 Advisor 扩展点补齐。只有最小验证明确表明这些接口无法承载回合语义时，才在运行时接管必要的回合控制，模型和工具执行仍复用 `ChatModel`、`ToolCallingManager` 与上游消息类型。 [Spring AI ChatModel 工具调用](https://docs.spring.io/spring-ai/reference/api/tools/chatmodel-tool-calling.html)
 
+用户图片使用 Spring AI `UserMessage` 和 `Media`。工具图片在单次回合的工具上下文中收集，模型请求 Advisor 在会话历史还原标准工具响应后添加带来源标记的视觉输入。MCP 发布器将同一附件映射到 SDK 的 `ImageContent`。图片预算与工具结果分开校验。 [Spring AI 2.1 消息模型](https://spring.io/blog/2026/11/20/spring-ai-2-1-0-GA-available-now/)
+
 ### D4. 决策包是版本化批次
 
 运行时持有本轮草案，`DecisionService` 持有已封存的包及其审批和执行进度。宿主通过 `DecisionReady` 事件与回合结果取得包 ID，再通过 `DecisionService` 读取和裁决。Agent 回合输出包 ID 后即可交还控制权，宿主可选择等待或异步处理。审批人与执行人的身份由宿主派生，`DecisionCommitted` 记录身份与条目结果码。模型判断可辅助分流，审批权限由宿主策略确定。
@@ -69,9 +73,9 @@ Java tool package --> agent-tool <-- agent-tool-spring-ai <-- agent-runtime
 | `CLOSED` | 存有同一个可重读回执，每个条目带成功、拒绝、失败或未知等结果。工具副作用由工具本身控制，通用执行器逐条记录。 |
 | `EXPIRED` / `CANCELLED` | 在执行认领之前进入终态，不启动工具。认领后提出取消则停止尚未认领的条目，已经开始的条目按真实结果记账。 |
 
-条目保存工具 ID、参数快照与摘要、调用者和稳定序号。一次性执行凭据绑定创建它的调用器与不可变工具定义。每次裁决绑定包 ID、内容版本及条目引用。同一个包在内存状态存续期间只认领一次，回执可按包 ID 对账。工具返回明确失败按失败记账，感知到副作用未确认的工具应报告 `UNKNOWN`，随后查询或人工对账。若后续开放宿主事务执行，事务边界覆盖包执行认领与回执记录。外部工具仍需提供自己的幂等键或状态查询能力。
+条目保存工具 ID、参数快照与摘要、调用者和稳定序号。内存执行的一次性凭据绑定创建它的调用器与不可变工具定义。每次裁决绑定包 ID、版本及条目引用，可保存逐项备注。同一个包在内存状态存续期间只认领一次，回执可按包 ID 对账。工具返回明确失败按失败记账，感知到副作用未确认的工具应报告 `UNKNOWN`，随后查询或人工对账。
 
-第一版对单进程内的并发与重试作保证。审批状态、在途参数和执行回执留在内存中，审计只记录关联 ID、主体、工具、版本、结果码和时间。跨重启恢复独立于 Spring AI Session。后续若启用，可用官方 JDBC Session Repository 保存模型历史，同时以 Spring JDBC 和事务持久化决策状态与执行记账。 [Spring AI JDBC Session Repository](https://docs.spring.io/spring-ai/reference/api/session/jdbc.html)
+宿主结算模式把审批、参数和回执交给可注入的 `DecisionStore`。`prepareCommit` 校验当前版本与权限，生成只读定序计划。`completeCommit` 在宿主事务中以批量条件更新记录回执和业务版本引用。宿主可原子写入时间线事件并从事件投影已提交快照。宿主重启后可以通过同一存储读取已保存的版本和回执。默认模式继续使用内存，Spring AI Session 独立管理模型历史。 [Spring AI JDBC Session Repository](https://docs.spring.io/spring-ai/reference/api/session/jdbc.html)
 
 直接父级协作由 `agent-runtime` 的下一里程碑提供。子 Agent 可只提问、只交非空草案，或把两者组合。父侧使用自己的当前权限裁决并代执行，按请求 ID 向对应子会话返回结果。等待模式能被直系子级请求唤醒，异步模式在后续一次有效模型请求中投递，模型失败可重投。跨进程部署再加受认证的连接和一次性兑现，复用同一包语义与回执。
 

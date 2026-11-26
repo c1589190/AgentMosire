@@ -9,7 +9,12 @@ import java.util.UUID;
 import io.github.c1589190.agentmosire.tool.ToolResult;
 
 public record DecisionReceipt(UUID packageId, UUID turnId, long version, String executionPrincipal,
-        String submittedBy, Instant completedAt, Map<Integer, ToolResult> outcomes) {
+        String submittedBy, Instant completedAt, Map<Integer, ToolResult> outcomes, String revisionRef) {
+    public DecisionReceipt(UUID packageId, UUID turnId, long version, String executionPrincipal,
+            String submittedBy, Instant completedAt, Map<Integer, ToolResult> outcomes) {
+        this(packageId, turnId, version, executionPrincipal, submittedBy, completedAt, outcomes, null);
+    }
+
     public DecisionReceipt {
         outcomes = Collections.unmodifiableMap(new LinkedHashMap<>(outcomes));
     }

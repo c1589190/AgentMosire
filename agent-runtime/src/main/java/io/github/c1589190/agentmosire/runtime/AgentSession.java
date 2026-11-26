@@ -9,6 +9,7 @@ import java.util.UUID;
 import java.util.concurrent.Flow;
 
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.model.tool.ToolCallLimitExceededException;
 import org.springframework.ai.session.advisor.SessionAdvisors;
@@ -24,6 +25,7 @@ import io.github.c1589190.agentmosire.tool.InvocationContext;
 import io.github.c1589190.agentmosire.tool.ToolId;
 import io.github.c1589190.agentmosire.tool.ToolInvoker.DeferredCall;
 import io.github.c1589190.agentmosire.tool.springai.SpringTools;
+import io.github.c1589190.agentmosire.tool.springai.SpringToolImages;
 
 import static io.github.c1589190.agentmosire.runtime.TurnResult.Status.*;
 
@@ -47,10 +49,18 @@ public final class AgentSession implements AutoCloseable {
     }
 
     public TurnResult chat(String message) {
+        return chat(new UserMessage(message));
+    }
+
+    public TurnResult chat(UserMessage message) {
         return run(message, false).ofType(AgentEvent.Ended.class).single().block().result();
     }
 
     public Flow.Publisher<AgentEvent> stream(String message) {
+        return stream(new UserMessage(message));
+    }
+
+    public Flow.Publisher<AgentEvent> stream(UserMessage message) {
         return JdkFlowAdapter.publisherToFlowPublisher(run(message, true));
     }
 
@@ -94,7 +104,7 @@ public final class AgentSession implements AutoCloseable {
         return active;
     }
 
-    private Flux<AgentEvent> run(String message, boolean streaming) {
+    private Flux<AgentEvent> run(UserMessage message, boolean streaming) {
         Objects.requireNonNull(message);
         return Flux.defer(() -> {
             Turn turn;
@@ -135,7 +145,7 @@ public final class AgentSession implements AutoCloseable {
         });
     }
 
-    private Flux<ChatResponse> responses(Turn turn, String message, boolean streaming) {
+    private Flux<ChatResponse> responses(Turn turn, UserMessage message, boolean streaming) {
         if (streaming) {
             return request(turn, message).stream().chatResponse();
         }
@@ -152,13 +162,14 @@ public final class AgentSession implements AutoCloseable {
         }).subscribeOn(Schedulers.boundedElastic()).flux();
     }
 
-    private ChatClient.ChatClientRequestSpec request(Turn turn, String message) {
+    private ChatClient.ChatClientRequestSpec request(Turn turn, UserMessage message) {
         var callbacks = agent.invoker.registry().tools().stream()
                 .filter(tool -> agent.config.tools().contains(tool.id()))
                 .filter(tool -> agent.invoker.isVisible(tool.id(), turn.caller))
                 .map(tool -> SpringTools.callback(agent.invoker, tool.id(), turn.caller, turn::defer, turn::isRunning))
                 .toList();
-        return agent.client.prompt().user(message).tools(callbacks)
+        return agent.client.prompt().messages(message).tools(callbacks)
+                .toolContext(new SpringToolImages.Attachments().context())
                 .advisors(SessionAdvisors.session(id.toString()));
     }
 
